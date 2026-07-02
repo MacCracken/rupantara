@@ -28,7 +28,7 @@ fn test_ln_fwd() {
     var y = alloc(C * 8);
     var mean = alloc(8);
     var rstd = alloc(8);
-    ln_fwd(x, gamma, beta, y, mean, rstd, 1, C);
+    ru_ln_fwd(x, gamma, beta, y, mean, rstd, 1, C);
 
     assert(f64_close(load64(mean), f64_from(2), tol_1e9()), "ln cached mean == 2");
     assert(f64_close(load64(y + 8), f64_from(0), tol_1e6()), "ln y[1] (x==mu) ~ 0");
@@ -51,7 +51,7 @@ fn test_gelu_fwd() {
     store64(x + 8, f64_from(10));
     store64(x + 16, f64_sub(f64_from(0), f64_from(10)));
     store64(x + 24, f64_from(1));
-    gelu_fwd(x, y, n);
+    ru_gelu_fwd(x, y, n);
 
     assert_eq(load64(y + 0), f64_from(0), "gelu(0) == 0 exactly");
     assert(f64_close(load64(y + 8), f64_from(10), tol_1e3()), "gelu(10) ~ 10");

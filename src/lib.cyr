@@ -33,7 +33,7 @@ include "lib/rosnet.cyr"
 # M1: the extracted transformer-forward ops from attn11.
 #   norm  — LayerNorm forward (leaf; f64 + math)
 #   act   — GELU forward (leaf; f64 + math)
-#   attn  — attention core + attn_fwd (rosnet linear_fwd; causal softmax + GQA)
+#   attn  — attention core + ru_attn_fwd (rosnet linear_fwd; causal softmax + GQA)
 #   mlp   — MLP forward (linear_fwd -> gelu -> linear_fwd)
 #   embed — token + learned-positional embedding
 #   head  — weight-tied LM head + softmax

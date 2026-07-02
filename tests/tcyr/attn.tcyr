@@ -1,4 +1,4 @@
-# tests/tcyr/attn.tcyr — rupantara attention forward (M1): attn_core_fwd + attn_fwd.
+# tests/tcyr/attn.tcyr — rupantara attention forward (M1): ru_attn_core_fwd + ru_attn_fwd.
 # Known-answer checks (causal mask, log-sum-exp softmax, PV mix) + invariants.
 include "src/lib.cyr"
 include "lib/assert.cyr"
@@ -30,7 +30,7 @@ fn test_attn_core_known() {
     store64(Vc + 0, f64_from(10)); store64(Vc + 8, f64_from(20));
     store64(Vc + 16, f64_from(30)); store64(Vc + 24, f64_from(40));
 
-    attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv);
+    ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv);
 
     # causal: P[0,0] == 1 exactly, P[0,1] stays 0 (upper triangle)
     assert_eq(load64(Pc + 0), f64_from(1), "attn P[0,0] == 1 (query 0, causal)");
@@ -50,7 +50,7 @@ fn test_attn_core_known() {
     return 0;
 }
 
-# attn_fwd with identity Q/K/V/O projections and x = [[1,0],[0,1]] reproduces the
+# ru_attn_fwd with identity Q/K/V/O projections and x = [[1,0],[0,1]] reproduces the
 # core mix over V=x: out[0] == x[0] = [1,0]; out[1] ~ [0.3302, 0.6698].
 fn test_attn_fwd_identity() {
     var T = 2; var C = 2; var nh = 1; var nkv = 1;
@@ -61,16 +61,16 @@ fn test_attn_fwd_identity() {
     store64(x + 0, f64_from(1)); store64(x + 8, f64_from(0));
     store64(x + 16, f64_from(0)); store64(x + 24, f64_from(1));
     var out = alloc(T * C * 8);
-    var ar = t_alloc(attn_arena_size(T, C, nh, nkv));
+    var ar = t_alloc(ru_attn_arena_size(T, C, nh, nkv));
 
-    attn_fwd(I, 0, I, 0, I, 0, I, 0, x, out, ar, T, C, nh, nkv, 0);
+    ru_attn_fwd(I, 0, I, 0, I, 0, I, 0, x, out, ar, T, C, nh, nkv, 0);
 
-    assert_eq(load64(out + 0), f64_from(1), "attn_fwd out[0,0] == x[0,0]");
-    assert_eq(load64(out + 8), f64_from(0), "attn_fwd out[0,1] == x[0,1]");
+    assert_eq(load64(out + 0), f64_from(1), "ru_attn_fwd out[0,0] == x[0,0]");
+    assert_eq(load64(out + 8), f64_from(0), "ru_attn_fwd out[0,1] == x[0,1]");
     var p10 = f64_div(f64_from(330227), f64_from(1000000));   # 0.330227
     var p11 = f64_div(f64_from(669773), f64_from(1000000));   # 0.669773
-    assert(f64_close(load64(out + 16), p10, tol_1e2()), "attn_fwd out[1,0] ~ 0.3302");
-    assert(f64_close(load64(out + 24), p11, tol_1e2()), "attn_fwd out[1,1] ~ 0.6698");
+    assert(f64_close(load64(out + 16), p10, tol_1e2()), "ru_attn_fwd out[1,0] ~ 0.3302");
+    assert(f64_close(load64(out + 24), p11, tol_1e2()), "ru_attn_fwd out[1,1] ~ 0.6698");
     return 0;
 }
 

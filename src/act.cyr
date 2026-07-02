@@ -1,15 +1,15 @@
 # @public — GELU forward (tanh approximation, GPT-2 form). Ported bit-identical
-# from attn11 `ops.cyr:gelu_fwd` (GPU fast-path removed). Name kept identical.
+# from attn11 `ops.cyr:ru_gelu_fwd` (GPU fast-path removed). Name kept identical.
 #
 #   g(x) = 0.5 * x * (1 + tanh( c*(x + a*x^3) )),  c = sqrt(2/pi), a = 0.044715
 # Source: Hendrycks & Gimpel (2016), "Gaussian Error Linear Units", arXiv:1606.08415.
 
-fn _gelu_c(): i64 { return f64_sqrt(f64_div(f64_from(2), F64_PI)); }          # sqrt(2/pi)
-fn _gelu_a(): i64 { return f64_div(f64_from(44715), f64_from(1000000)); }     # 0.044715
+fn _ru_gelu_c(): i64 { return f64_sqrt(f64_div(f64_from(2), F64_PI)); }          # sqrt(2/pi)
+fn _ru_gelu_a(): i64 { return f64_div(f64_from(44715), f64_from(1000000)); }     # 0.044715
 
-fn gelu_fwd(x, y, n): i64 {
-    var c = _gelu_c();
-    var a = _gelu_a();
+fn ru_gelu_fwd(x, y, n): i64 {
+    var c = _ru_gelu_c();
+    var a = _ru_gelu_a();
     var half = f64_div(f64_from(1), f64_from(2));
     var one = f64_from(1);
     var i = 0;

@@ -15,12 +15,20 @@ attn11-the-binary**. Pure Cyrius.
 ## Status
 
 **0.2.0 — M1 the transformer forward (rupantara side)** — the GPT-2-shaped forward
-extracted bit-identical from attn11: token + learned-positional embedding,
-LayerNorm, causal softmax multi-head attention (+ GQA), GELU MLP, the pre-norm
-block, the block-stack forward, and the weight-tied LM head + softmax. Runs green
-standalone (43 assertions). The **cross-repo attn11 re-point** + full parity run
-is the remaining step (its own go) — see
-[`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin **6.3.27**.
+ported verbatim from attn11: token + learned-positional embedding, LayerNorm,
+causal softmax multi-head attention (+ GQA), GELU MLP, the pre-norm block, the
+block-stack forward, and the weight-tied LM head + softmax. Runs green standalone
+(43 assertions). The full public + private op surface is `ru_*`-namespaced.
+
+**Re-fold landed (2026-07-02):** attn11 now **consumes** rupantara's three leaf
+ops — `ru_ln_fwd`, `ru_gelu_fwd`, `ru_attn_core_fwd` (causal) — and its full
+grad-check suite is green in one binary, so those three are **proven bit-identical**
+(the real parity gate, no offline compare). rupantara's **composition** ops
+(`ru_embed_fwd`, `ru_head_fwd`, `ru_model_fwd`, …) are ported + internally tested,
+but attn11 keeps its own, so they are **not yet cross-validated** against attn11 —
+anukūlana is their first real consumer. See
+[`docs/development/roadmap.md`](docs/development/roadmap.md) +
+[`docs/development/refold-plan.md`](docs/development/refold-plan.md). Cyrius pin **6.3.27**.
 
 ## Build & test
 

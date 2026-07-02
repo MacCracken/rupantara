@@ -1,5 +1,5 @@
 # @public — position-wise MLP FORWARD (GELU, GPT-2 form). Ported from attn11's
-# inline dense-MLP forward (`src/model.cyr` model_forward: qlinear_fwd -> gelu_fwd
+# inline dense-MLP forward (`src/model.cyr` model_forward: qlinear_fwd -> ru_gelu_fwd
 # -> qlinear_fwd). rupantara uses rosnet's linear_fwd directly (attn11's
 # qlinear_fwd is a passthrough to it off the ternary path — bit-identical).
 #
@@ -9,9 +9,9 @@
 #
 # fc/gg are caller-provided scratch (M*F f64 each), mirroring attn11's LA_fc/LA_g.
 # Biases bfc/bproj may be 0.
-fn mlp_fwd(x, Wfc, bfc, Wproj, bproj, fc, gg, y, M, C, F): i64 {
+fn ru_mlp_fwd(x, Wfc, bfc, Wproj, bproj, fc, gg, y, M, C, F): i64 {
     linear_fwd(x, Wfc, bfc, fc, M, C, F);
-    gelu_fwd(fc, gg, M * F);
+    ru_gelu_fwd(fc, gg, M * F);
     linear_fwd(gg, Wproj, bproj, y, M, F, C);
     return 0;
 }

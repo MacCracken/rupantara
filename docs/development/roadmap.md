@@ -49,8 +49,17 @@ forward-only arena); `mlp_fwd`; `embed_fwd` (token + learned-abs pos);
 MHA/dense block. Tests: `ops.tcyr` (9), `attn.tcyr` (12), `forward.tcyr` (21) —
 attention known-answer, and a `model_fwd` plumbing-parity check (zeroed-weight
 pass-through == embed→LN→head, byte-identical).
-**Remaining:** ⚠ **cross-repo, maintainer's go** — the attn11-side re-point (make
-attn11 consume `dist/rupantara.cyr`) + the full bit-identical-vs-attn11 parity run.
+**Re-fold DONE (2026-07-02):** the op surface is `ru_*`/`_ru_*`-namespaced (12
+public + 28 private; `comm -12` vs attn11 = empty) and **attn11 consumes
+rupantara's three leaf ops** (`ru_ln_fwd`, `ru_gelu_fwd`, `ru_attn_core_fwd`
+causal). attn11's full grad-check suite is **1049 green in one binary** with them
+delegated → those three are **proven bit-identical** (the real parity gate; no
+offline compare). **Remaining (honest):** the **composition** ops (`ru_embed_fwd` /
+`ru_head_fwd` / `ru_model_fwd` / …) are *not* cross-validated — attn11 keeps its
+own (incompatible global-reading signatures + training concerns). A
+rupantara↔attn11 whole-`ru_model_fwd` parity fixture (fixed tiny model + input,
+logits bit-for-bit) is the true M1-acceptance gap and should precede anukūlana's
+fidelity gate.
 - **Scope** (new `src/*.cyr` modules, flat): token embed + **learned positional
   embed**; **LayerNorm** fwd; **softmax multi-head causal attention** fwd; **MLP
   (GELU)** fwd; the **pre-norm block**; the **forward over a block stack**;

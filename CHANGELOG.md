@@ -6,11 +6,50 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
-### Next (M1 remaining — cross-repo, maintainer's go)
-- The **attn11-side re-point**: make attn11 consume `dist/rupantara.cyr` (attn11
-  becomes a thin consumer of its own extracted forward) and run the full
-  **bit-identical-vs-attn11 parity gate**. This edits the **attn11** repo — its own
-  explicit go. The rupantara side shipped green + standalone in 0.2.0.
+## [0.3.0] — 2026-07-02
+
+**Re-fold — `ru_*` namespacing + attn11 consumes rupantara's leaf ops.** The full
+op surface is namespaced so attn11 can link rupantara, and attn11 now delegates its
+CPU leaf forward (LayerNorm / GELU / causal attention core) to rupantara — **proven
+bit-identical** by attn11's 1049 grad-checks green in one binary (the real parity
+gate, no offline compare).
+
+### Breaking
+- **Public forward ops renamed to `ru_*`.** Consumers calling the 0.2.0 bare names
+  (`ln_fwd`, `gelu_fwd`, `attn_fwd`, `model_fwd`, `embed_fwd`, `head_fwd`,
+  `head_fwd_row`, `mlp_fwd`, `block_fwd`, `softmax_fwd`, `attn_core_fwd`,
+  `attn_arena_size`) must switch to the `ru_`-prefixed forms (`ru_ln_fwd`, …).
+  **Migration:** prefix the call site with `ru_`. Numerics are unchanged — pure rename.
+
+### Changed
+- **`ru_*` / `_ru_*` namespacing of the full op surface** (the re-fold
+  prerequisite). Renamed all 12 public forward ops to `ru_` (`ru_ln_fwd`,
+  `ru_gelu_fwd`, `ru_attn_core_fwd`, `ru_attn_fwd`, `ru_mlp_fwd`, `ru_embed_fwd`,
+  `ru_block_fwd`, `ru_model_fwd`, `ru_head_fwd`, `ru_head_fwd_row`,
+  `ru_softmax_fwd`, `ru_attn_arena_size`) and all 28 colliding private helpers to
+  `_ru_` (`_ru_at_*`, `_ru_o_*`, `_ru_eps_ln`, `_ru_gelu_*`, `_ru_blk*`,
+  `_ru_emb_end`). Rename only — **bit-identical**, `make test` = 43/43, `dist`
+  regenerated. Motivation: Cyrius has no module-private scoping and *silently
+  shadows* duplicate `fn`s (last-def-wins, warn-only), so `comm -12` vs attn11 had
+  to reach **empty** before attn11 could link rupantara. **API note:** consumers
+  now call `ru_*` (breaking vs 0.2.0's un-prefixed names) — pre-1.0, surface still
+  moving.
+
+### Added
+- **attn11 re-fold (leaf ops) landed** (cross-repo; 2026-07-02). attn11 added
+  `[deps.rupantara]` + `include "lib/rupantara.cyr"` and now delegates the CPU
+  bodies of `ln_fwd` → `ru_ln_fwd`, `gelu_fwd` → `ru_gelu_fwd`, and
+  `attn_core_fwd` (causal, `g_bidir==0`) → `ru_attn_core_fwd`, keeping its GPU +
+  diffusion branches. attn11's full grad-check suite is **1049 green in one
+  binary** with the delegation → those three leaf ops are **proven bit-identical**
+  (the real parity gate, no offline compare). See `docs/development/refold-plan.md`.
+
+### Known limitations (scope — honest)
+- The **composition** ops (`ru_embed_fwd` / `ru_head_fwd` / `ru_model_fwd` / …) are
+  *not* cross-validated against attn11 (attn11 keeps its own — incompatible
+  global-reading signatures + training concerns). A rupantara↔attn11
+  whole-`ru_model_fwd` parity fixture is the true M1-acceptance gap; do it before
+  anukūlana's fidelity gate relies on `ru_model_fwd`.
 
 ## [0.2.0] — 2026-07-02
 

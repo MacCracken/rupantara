@@ -1,5 +1,5 @@
 # @public — causal multi-head self-attention FORWARD. Ported bit-identical from
-# attn11 `src/attn.cyr` (attn_core_fwd + attn_fwd), with the training-only paths
+# attn11 `src/attn.cyr` (ru_attn_core_fwd + ru_attn_fwd), with the training-only paths
 # removed: no GPU fast-path, no bidirectional (diffusion) mask, no RoPE branch
 # (M1 is learned-absolute positions; RoPE is a later increment). Names + the
 # per-head arithmetic are kept IDENTICAL to attn11 so the eventual re-point is a
@@ -21,31 +21,31 @@
 # The forward caches live in one pre-allocated arena (fixed shapes). Layout — the
 # FIRST five regions of attn11's arena, in the SAME order, so the sub-pointer math
 # below is byte-identical to attn11's (attn11's full arena, which also carries the
-# backward temporaries, drops straight into attn_fwd here). rupantara is
+# backward temporaries, drops straight into ru_attn_fwd here). rupantara is
 # forward-only, so it sizes just these five:
 #   Qc       : T*C
 #   Kc Vc    : T*Ckv each
 #   Pc       : nh*T*T   (attention probabilities, causal-masked)
 #   concat   : T*C      (pre-Wo head concatenation)
-fn attn_arena_size(T, C, nh, nkv): i64 {
+fn ru_attn_arena_size(T, C, nh, nkv): i64 {
     var Ckv = nkv * (C / nh);
     return 2 * T * C + 2 * T * Ckv + nh * T * T;
 }
 
 # arena sub-pointers (deterministic given dims; Ckv = nkv * (C/nh)) — identical to
-# attn11's _at_Qc.._at_concat (these regions come first, so the offsets match
+# attn11's _ru_at_Qc.._ru_at_concat (these regions come first, so the offsets match
 # regardless of whether the backward temporaries follow).
-fn _at_Qc(ar): i64 { return ar; }
-fn _at_Kc(ar, T, C): i64 { return ar + (T * C) * 8; }
-fn _at_Vc(ar, T, C, Ckv): i64 { return ar + (T * C + T * Ckv) * 8; }
-fn _at_Pc(ar, T, C, Ckv): i64 { return ar + (T * C + 2 * T * Ckv) * 8; }
-fn _at_concat(ar, T, C, nh, Ckv): i64 { return ar + (T * C + 2 * T * Ckv + nh * T * T) * 8; }
+fn _ru_at_Qc(ar): i64 { return ar; }
+fn _ru_at_Kc(ar, T, C): i64 { return ar + (T * C) * 8; }
+fn _ru_at_Vc(ar, T, C, Ckv): i64 { return ar + (T * C + T * Ckv) * 8; }
+fn _ru_at_Pc(ar, T, C, Ckv): i64 { return ar + (T * C + 2 * T * Ckv) * 8; }
+fn _ru_at_concat(ar, T, C, nh, Ckv): i64 { return ar + (T * C + 2 * T * Ckv + nh * T * T) * 8; }
 
 # ---- shared attention core (post-projection) --------------------------------
 # Given Qc(T,C), Kc(T,Ckv), Vc(T,Ckv) it fills Pc(nh,T,T) and concat(T,C): causal
 # scaled-dot-product, each query head h attending its shared K/V head
 # kvb = (h/gsz)*hd. ONE source of truth for the per-head softmax/PV arithmetic.
-fn attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
+fn ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
     var hd = C / nh;
     var Ckv = nkv * hd;
     var gsz = nh / nkv;             # query heads per K/V head (GQA group size)
@@ -142,17 +142,17 @@ fn attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
 # attn11; M1 supports 0 (learned-absolute) only — RoPE (1) is a later increment.
 # rupantara uses rosnet's linear_fwd directly (attn11's qlinear_fwd is a pure
 # passthrough to it off the ternary path, so this is bit-identical).
-fn attn_fwd(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x, out, ar, T, C, nh, nkv, pos_kind): i64 {
+fn ru_attn_fwd(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x, out, ar, T, C, nh, nkv, pos_kind): i64 {
     var Ckv = nkv * (C / nh);
-    var Qc = _at_Qc(ar);
-    var Kc = _at_Kc(ar, T, C);
-    var Vc = _at_Vc(ar, T, C, Ckv);
-    var Pc = _at_Pc(ar, T, C, Ckv);
-    var concat = _at_concat(ar, T, C, nh, Ckv);
+    var Qc = _ru_at_Qc(ar);
+    var Kc = _ru_at_Kc(ar, T, C);
+    var Vc = _ru_at_Vc(ar, T, C, Ckv);
+    var Pc = _ru_at_Pc(ar, T, C, Ckv);
+    var concat = _ru_at_concat(ar, T, C, nh, Ckv);
     linear_fwd(x, Wq, bq, Qc, T, C, C);
     linear_fwd(x, Wk, bk, Kc, T, C, Ckv);
     linear_fwd(x, Wv, bv, Vc, T, C, Ckv);
-    attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv);
+    ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv);
     linear_fwd(concat, Wo, bo, out, T, C, C);
     return 0;
 }

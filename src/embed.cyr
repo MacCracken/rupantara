@@ -8,7 +8,7 @@
 #
 # tokens: n integer ids. tok_emb: (V,C). pos_emb: (T,C). x0: (n,C) output (the
 # residual stream at layer 0). n <= T (eval windows may be shorter than context).
-fn embed_fwd(tokens, tok_emb, pos_emb, x0, n, C): i64 {
+fn ru_embed_fwd(tokens, tok_emb, pos_emb, x0, n, C): i64 {
     var t = 0;
     while (t < n) {
         var tok = load64(tokens + t * 8);

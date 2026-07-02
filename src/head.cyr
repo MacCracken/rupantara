@@ -1,5 +1,5 @@
 # @public — weight-tied LM head + softmax FORWARD. Ported bit-identical from
-# attn11 `src/model.cyr:head_fwd_row` (the same 4-lane SIMD dot + tree reduction)
+# attn11 `src/model.cyr:ru_head_fwd_row` (the same 4-lane SIMD dot + tree reduction)
 # and the probability half of `src/ops.cyr:softmax_xent_fwd`. attn11 reads its
 # model globals (g_C/g_V/P_tokemb); rupantara takes explicit pointers/dims.
 #
@@ -7,7 +7,7 @@
 # (Press & Wolf 2017 arXiv:1608.05859; Inan et al. 2017 arXiv:1611.01462).
 
 # logits_row(V) = f_row(C) @ tok_emb^T — one row. tok_emb: (V,C) row-major.
-fn head_fwd_row(f_row, tok_emb, logits_row, C, V): i64 {
+fn ru_head_fwd_row(f_row, tok_emb, logits_row, C, V): i64 {
     var c4 = C - (C % 4);
     var acc[32];                     # 4-lane dot accumulator (SIMD head)
     var v = 0;
@@ -32,12 +32,12 @@ fn head_fwd_row(f_row, tok_emb, logits_row, C, V): i64 {
     return 0;
 }
 
-# logits(n,V) = f(n,C) @ tok_emb^T over the first n rows. attn11 loops head_fwd_row
+# logits(n,V) = f(n,C) @ tok_emb^T over the first n rows. attn11 loops ru_head_fwd_row
 # the same way (head_fwd_n), so the batch and cached-decode paths share arithmetic.
-fn head_fwd(f, tok_emb, logits, n, C, V): i64 {
+fn ru_head_fwd(f, tok_emb, logits, n, C, V): i64 {
     var t = 0;
     while (t < n) {
-        head_fwd_row(f + t * C * 8, tok_emb, logits + t * V * 8, C, V);
+        ru_head_fwd_row(f + t * C * 8, tok_emb, logits + t * V * 8, C, V);
         t = t + 1;
     }
     return 0;
@@ -47,7 +47,7 @@ fn head_fwd(f, tok_emb, logits, n, C, V): i64 {
 # stability, then normalize. Bit-identical to the probability output of attn11's
 # softmax_xent_fwd (Goodfellow, Bengio, Courville 2016, §4.1/§6.2) — the
 # cross-entropy loss/target half stays in attn11 (training).
-fn softmax_fwd(logits, probs, M, V): i64 {
+fn ru_softmax_fwd(logits, probs, M, V): i64 {
     var m = 0;
     while (m < M) {
         var row = logits + m * V * 8;

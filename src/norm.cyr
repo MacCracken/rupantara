@@ -1,4 +1,4 @@
-# @public — LayerNorm forward. Ported bit-identical from attn11 `ops.cyr:ln_fwd`
+# @public — LayerNorm forward. Ported bit-identical from attn11 `ops.cyr:ru_ln_fwd`
 # (the GPU fast-path removed; rupantara is CPU-f64). Names kept identical so the
 # eventual attn11 re-point is a clean drop-in (extract-and-re-fold).
 #
@@ -7,10 +7,10 @@
 # Source: Ba, Kiros, Hinton (2016), "Layer Normalization", arXiv:1607.06450.
 
 # eps built from an integer ratio (long-digit float literals mis-parse).
-fn _eps_ln(): i64 { return f64_div(f64_from(1), f64_from(100000)); }   # 1e-5
+fn _ru_eps_ln(): i64 { return f64_div(f64_from(1), f64_from(100000)); }   # 1e-5
 
-fn ln_fwd(x, gamma, beta, y, mean, rstd, M, C): i64 {
-    var eps = _eps_ln();
+fn ru_ln_fwd(x, gamma, beta, y, mean, rstd, M, C): i64 {
+    var eps = _ru_eps_ln();
     var invC = f64_div(f64_from(1), f64_from(C));
     var m = 0;
     while (m < M) {

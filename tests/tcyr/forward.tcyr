@@ -1,5 +1,5 @@
 # tests/tcyr/forward.tcyr — rupantara forward composition (M1): embed / mlp / head
-# / softmax leaf checks + the block-stack model_fwd (plumbing parity + softmax).
+# / softmax leaf checks + the block-stack ru_model_fwd (plumbing parity + softmax).
 include "src/lib.cyr"
 include "lib/assert.cyr"
 
@@ -34,7 +34,7 @@ fn _set_identity(p, off, C): i64 {
     return 0;
 }
 
-# embed_fwd: x0[t] = tok_emb[tokens[t]] + pos_emb[t]. tok_emb v2=[5,6], v0=[1,2];
+# ru_embed_fwd: x0[t] = tok_emb[tokens[t]] + pos_emb[t]. tok_emb v2=[5,6], v0=[1,2];
 # pos t0=[10,20], t1=[30,40]; tokens=[2,0] -> x0=[[15,26],[31,42]].
 fn test_embed_fwd() {
     var V = 3; var C = 2; var T = 2;
@@ -47,7 +47,7 @@ fn test_embed_fwd() {
     var tokens = alloc(T * 8);
     store64(tokens + 0, 2); store64(tokens + 8, 0);
     var x0 = alloc(T * C * 8);
-    embed_fwd(tokens, tok_emb, pos_emb, x0, T, C);
+    ru_embed_fwd(tokens, tok_emb, pos_emb, x0, T, C);
     assert_eq(load64(x0 + 0), f64_from(15), "embed x0[0,0] == 5+10");
     assert_eq(load64(x0 + 8), f64_from(26), "embed x0[0,1] == 6+20");
     assert_eq(load64(x0 + 16), f64_from(31), "embed x0[1,0] == 1+30");
@@ -55,7 +55,7 @@ fn test_embed_fwd() {
     return 0;
 }
 
-# mlp_fwd with identity Wfc/Wproj (no bias) == gelu(x). x=[0,1] -> [0, ~0.8412].
+# ru_mlp_fwd with identity Wfc/Wproj (no bias) == gelu(x). x=[0,1] -> [0, ~0.8412].
 fn test_mlp_fwd_identity() {
     var M = 1; var C = 2; var F = 2;
     var I = alloc(C * C * 8);
@@ -65,14 +65,14 @@ fn test_mlp_fwd_identity() {
     var fc = alloc(M * F * 8);
     var gg = alloc(M * F * 8);
     var y = alloc(M * C * 8);
-    mlp_fwd(x, I, 0, I, 0, fc, gg, y, M, C, F);
+    ru_mlp_fwd(x, I, 0, I, 0, fc, gg, y, M, C, F);
     assert_eq(load64(y + 0), f64_from(0), "mlp gelu(0) == 0 exactly");
     var e1 = f64_div(f64_from(8412), f64_from(10000));   # 0.8412
     assert(f64_close(load64(y + 8), e1, f64_div(f64_from(5), f64_from(10000))), "mlp gelu(1) ~ 0.8412");
     return 0;
 }
 
-# head_fwd_row: logits[v] = f . tok_emb[v]. f=[1,0], emb rows [1,2],[3,4],[5,6] -> [1,3,5].
+# ru_head_fwd_row: logits[v] = f . tok_emb[v]. f=[1,0], emb rows [1,2],[3,4],[5,6] -> [1,3,5].
 fn test_head_fwd() {
     var C = 2; var V = 3;
     var tok_emb = alloc(V * C * 8);
@@ -81,20 +81,20 @@ fn test_head_fwd() {
     var f = alloc(C * 8);
     store64(f + 0, f64_from(1)); store64(f + 8, f64_from(0));
     var logits = alloc(V * 8);
-    head_fwd_row(f, tok_emb, logits, C, V);
+    ru_head_fwd_row(f, tok_emb, logits, C, V);
     assert_eq(load64(logits + 0), f64_from(1), "head logits[0] == 1");
     assert_eq(load64(logits + 8), f64_from(3), "head logits[1] == 3");
     assert_eq(load64(logits + 16), f64_from(5), "head logits[2] == 5");
     return 0;
 }
 
-# softmax_fwd: row sums to 1, ordering preserved (logits [1,2,3]).
+# ru_softmax_fwd: row sums to 1, ordering preserved (logits [1,2,3]).
 fn test_softmax_fwd() {
     var M = 1; var V = 3;
     var logits = alloc(V * 8);
     store64(logits + 0, f64_from(1)); store64(logits + 8, f64_from(2)); store64(logits + 16, f64_from(3));
     var probs = alloc(V * 8);
-    softmax_fwd(logits, probs, M, V);
+    ru_softmax_fwd(logits, probs, M, V);
     var s = f64_add(f64_add(load64(probs + 0), load64(probs + 8)), load64(probs + 16));
     assert(f64_close(s, f64_from(1), tol_1e9()), "softmax row sums to 1");
     assert(f64_gt(load64(probs + 16), load64(probs + 8)) == 1, "softmax p[2] > p[1]");
@@ -113,15 +113,15 @@ fn _build_model(cfg): i64 {
     store64(params + 6 * 8, f64_from(10)); store64(params + 7 * 8, f64_from(20));
     store64(params + 8 * 8, f64_from(30)); store64(params + 9 * 8, f64_from(40));
     # LN gammas = 1: ln1_g, ln2_g (block 0), lnf_g
-    var base = _blk_base(cfg, 0);
-    _fill_ones(params, base + _o_ln1g(cfg), 2);
-    _fill_ones(params, base + _o_ln2g(cfg), 2);
-    var lnfg = _emb_end(cfg) + _cfg_NL(cfg) * _blk(cfg);
+    var base = _ru_blk_base(cfg, 0);
+    _fill_ones(params, base + _ru_o_ln1g(cfg), 2);
+    _fill_ones(params, base + _ru_o_ln2g(cfg), 2);
+    var lnfg = _ru_emb_end(cfg) + _cfg_NL(cfg) * _ru_blk(cfg);
     _fill_ones(params, lnfg, 2);
     return params;
 }
 
-# model_fwd plumbing PARITY: with all attn+MLP weights zero, the block is a pure
+# ru_model_fwd plumbing PARITY: with all attn+MLP weights zero, the block is a pure
 # pass-through (attn_out=0 via Wo=0, mlp_out=0 via Wproj=0), so the logits MUST
 # equal running embed -> final-LN -> head directly. Byte-identical check.
 fn test_model_passthrough() {
@@ -132,20 +132,20 @@ fn test_model_passthrough() {
     store64(tokens + 0, 2); store64(tokens + 8, 0);
     var logits = t_alloc(T * V);
     var probs = t_alloc(T * V);
-    model_fwd(cfg, params, tokens, logits, probs);
+    ru_model_fwd(cfg, params, tokens, logits, probs);
 
     # expected: embed -> final LN -> head, computed directly with the same buffers
     var xe = t_alloc(T * C);
-    embed_fwd(tokens, _p_tokemb(params), _p_posemb(params, cfg), xe, T, C);
+    ru_embed_fwd(tokens, _p_tokemb(params), _p_posemb(params, cfg), xe, T, C);
     var afe = t_alloc(T * C);
     var me = t_alloc(T); var re = t_alloc(T);
-    ln_fwd(xe, _p_lnfg(params, cfg), _p_lnfb(params, cfg), afe, me, re, T, C);
+    ru_ln_fwd(xe, _p_lnfg(params, cfg), _p_lnfb(params, cfg), afe, me, re, T, C);
     var le = t_alloc(T * V);
-    head_fwd(afe, _p_tokemb(params), le, T, C, V);
+    ru_head_fwd(afe, _p_tokemb(params), le, T, C, V);
 
     var i = 0;
     while (i < T * V) {
-        assert_eq(load64(logits + i * 8), load64(le + i * 8), "model_fwd == embed->LN->head (passthrough)");
+        assert_eq(load64(logits + i * 8), load64(le + i * 8), "ru_model_fwd == embed->LN->head (passthrough)");
         i = i + 1;
     }
     # softmax rows each sum to 1
@@ -154,13 +154,13 @@ fn test_model_passthrough() {
         var s = f64_from(0);
         var v = 0;
         while (v < V) { s = f64_add(s, load64(probs + (r * V + v) * 8)); v = v + 1; }
-        assert(f64_close(s, f64_from(1), tol_1e9()), "model_fwd probs row sums to 1");
+        assert(f64_close(s, f64_from(1), tol_1e9()), "ru_model_fwd probs row sums to 1");
         r = r + 1;
     }
     return 0;
 }
 
-# model_fwd with a NON-trivial block (Wv=I, Wo=I => attention mixes the value
+# ru_model_fwd with a NON-trivial block (Wv=I, Wo=I => attention mixes the value
 # stream into the residual) must differ from the pass-through logits — proof the
 # block actually transforms, not just plumbs through.
 fn test_model_attention_contributes() {
@@ -168,24 +168,24 @@ fn test_model_attention_contributes() {
     var pa = _build_model(cfgA);              # pass-through
     var cfgB = alloc(64);
     var pb = _build_model(cfgB);
-    var baseB = _blk_base(cfgB, 0);
-    _set_identity(pb, baseB + _o_Wv(cfgB), 2);   # Wv = I (Ckv==C==2)
-    _set_identity(pb, baseB + _o_Wo(cfgB), 2);   # Wo = I
+    var baseB = _ru_blk_base(cfgB, 0);
+    _set_identity(pb, baseB + _ru_o_Wv(cfgB), 2);   # Wv = I (Ckv==C==2)
+    _set_identity(pb, baseB + _ru_o_Wo(cfgB), 2);   # Wo = I
 
     var V = 3; var T = 2;
     var tokens = alloc(T * 8);
     store64(tokens + 0, 2); store64(tokens + 8, 0);
     var la = t_alloc(T * V);
     var lb = t_alloc(T * V);
-    model_fwd(cfgA, pa, tokens, la, 0);
-    model_fwd(cfgB, pb, tokens, lb, 0);
+    ru_model_fwd(cfgA, pa, tokens, la, 0);
+    ru_model_fwd(cfgB, pb, tokens, lb, 0);
     var differ = 0;
     var i = 0;
     while (i < T * V) {
         if (f64_eq(load64(la + i * 8), load64(lb + i * 8)) == 0) { differ = 1; }
         i = i + 1;
     }
-    assert(differ == 1, "model_fwd: attention (Wv=Wo=I) changes the logits");
+    assert(differ == 1, "ru_model_fwd: attention (Wv=Wo=I) changes the logits");
     return 0;
 }
 
