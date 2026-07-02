@@ -1,0 +1,25 @@
+# @public — input embedding FORWARD: token lookup + learned ABSOLUTE positional
+# embedding. Ported from attn11 `src/model.cyr:embed_fwd_n` (the AR / learned-abs
+# path — no RoPE, no diffusion [MASK] embedding; those are attn11 training concerns
+# outside rupantara's forward scope). rupantara takes explicit pointers instead of
+# reading attn11's model globals.
+#
+#   x0[t, c] = tok_emb[tokens[t], c] + pos_emb[t, c]
+#
+# tokens: n integer ids. tok_emb: (V,C). pos_emb: (T,C). x0: (n,C) output (the
+# residual stream at layer 0). n <= T (eval windows may be shorter than context).
+fn embed_fwd(tokens, tok_emb, pos_emb, x0, n, C): i64 {
+    var t = 0;
+    while (t < n) {
+        var tok = load64(tokens + t * 8);
+        var c = 0;
+        while (c < C) {
+            var e = load64(tok_emb + (tok * C + c) * 8);
+            e = f64_add(e, load64(pos_emb + (t * C + c) * 8));
+            store64(x0 + (t * C + c) * 8, e);
+            c = c + 1;
+        }
+        t = t + 1;
+    }
+    return 0;
+}

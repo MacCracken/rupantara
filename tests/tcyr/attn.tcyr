@@ -1,0 +1,85 @@
+# tests/tcyr/attn.tcyr — rupantara attention forward (M1): attn_core_fwd + attn_fwd.
+# Known-answer checks (causal mask, log-sum-exp softmax, PV mix) + invariants.
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+fn f64_close(a, b, tol): i64 {
+    var d = f64_sub(a, b);
+    if (f64_lt(d, f64_from(0))) { d = f64_sub(f64_from(0), d); }
+    if (f64_lt(d, tol)) { return 1; }
+    return 0;
+}
+fn tol_1e2(): i64 { return f64_div(f64_from(1), f64_from(100)); }
+fn tol_1e9(): i64 { return f64_div(f64_from(1), f64_from(1000000000)); }
+
+# T=2, C=2, single head. Qc=Kc=[[1,0],[0,1]], Vc=[[10,20],[30,40]].
+# Causal: query 0 sees only key 0 -> P[0,0]=1, concat[0]=V[0]=[10,20].
+# Query 1: scores [0, 1/sqrt2] -> softmax -> P10~0.3302, P11~0.6698;
+#   concat[1] = P10*V0 + P11*V1 ~ [23.395, 33.395].
+fn test_attn_core_known() {
+    var T = 2; var C = 2; var nh = 1; var nkv = 1;
+    var Qc = alloc(T * C * 8);
+    var Kc = alloc(T * C * 8);
+    var Vc = alloc(T * C * 8);
+    var Pc = alloc(nh * T * T * 8);
+    var concat = alloc(T * C * 8);
+    store64(Qc + 0, f64_from(1)); store64(Qc + 8, f64_from(0));
+    store64(Qc + 16, f64_from(0)); store64(Qc + 24, f64_from(1));
+    store64(Kc + 0, f64_from(1)); store64(Kc + 8, f64_from(0));
+    store64(Kc + 16, f64_from(0)); store64(Kc + 24, f64_from(1));
+    store64(Vc + 0, f64_from(10)); store64(Vc + 8, f64_from(20));
+    store64(Vc + 16, f64_from(30)); store64(Vc + 24, f64_from(40));
+
+    attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv);
+
+    # causal: P[0,0] == 1 exactly, P[0,1] stays 0 (upper triangle)
+    assert_eq(load64(Pc + 0), f64_from(1), "attn P[0,0] == 1 (query 0, causal)");
+    assert_eq(load64(Pc + 8), f64_from(0), "attn P[0,1] == 0 (upper triangle)");
+    # query 0 output is exactly V[0]
+    assert_eq(load64(concat + 0), f64_from(10), "attn concat[0,0] == V[0,0]");
+    assert_eq(load64(concat + 8), f64_from(20), "attn concat[0,1] == V[0,1]");
+    # query 1 probabilities sum to 1, key 1 weighted more than key 0
+    var p10 = load64(Pc + 16); var p11 = load64(Pc + 24);
+    assert(f64_close(f64_add(p10, p11), f64_from(1), tol_1e9()), "attn P row1 sums to 1");
+    assert(f64_gt(p11, p10) == 1, "attn P[1,1] > P[1,0] (higher score)");
+    # query 1 mixed value ~ [23.395, 33.395]
+    var e0 = f64_div(f64_from(2339546), f64_from(100000));   # 23.39546
+    var e1 = f64_div(f64_from(3339546), f64_from(100000));   # 33.39546
+    assert(f64_close(load64(concat + 16), e0, tol_1e2()), "attn concat[1,0] ~ 23.395");
+    assert(f64_close(load64(concat + 24), e1, tol_1e2()), "attn concat[1,1] ~ 33.395");
+    return 0;
+}
+
+# attn_fwd with identity Q/K/V/O projections and x = [[1,0],[0,1]] reproduces the
+# core mix over V=x: out[0] == x[0] = [1,0]; out[1] ~ [0.3302, 0.6698].
+fn test_attn_fwd_identity() {
+    var T = 2; var C = 2; var nh = 1; var nkv = 1;
+    var I = alloc(C * C * 8);
+    store64(I + 0, f64_from(1)); store64(I + 8, f64_from(0));
+    store64(I + 16, f64_from(0)); store64(I + 24, f64_from(1));
+    var x = alloc(T * C * 8);
+    store64(x + 0, f64_from(1)); store64(x + 8, f64_from(0));
+    store64(x + 16, f64_from(0)); store64(x + 24, f64_from(1));
+    var out = alloc(T * C * 8);
+    var ar = t_alloc(attn_arena_size(T, C, nh, nkv));
+
+    attn_fwd(I, 0, I, 0, I, 0, I, 0, x, out, ar, T, C, nh, nkv, 0);
+
+    assert_eq(load64(out + 0), f64_from(1), "attn_fwd out[0,0] == x[0,0]");
+    assert_eq(load64(out + 8), f64_from(0), "attn_fwd out[0,1] == x[0,1]");
+    var p10 = f64_div(f64_from(330227), f64_from(1000000));   # 0.330227
+    var p11 = f64_div(f64_from(669773), f64_from(1000000));   # 0.669773
+    assert(f64_close(load64(out + 16), p10, tol_1e2()), "attn_fwd out[1,0] ~ 0.3302");
+    assert(f64_close(load64(out + 24), p11, tol_1e2()), "attn_fwd out[1,1] ~ 0.6698");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_attn_core_known();
+    test_attn_fwd_identity();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(60, rc);

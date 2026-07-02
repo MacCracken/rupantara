@@ -1,0 +1,158 @@
+# @public — causal multi-head self-attention FORWARD. Ported bit-identical from
+# attn11 `src/attn.cyr` (attn_core_fwd + attn_fwd), with the training-only paths
+# removed: no GPU fast-path, no bidirectional (diffusion) mask, no RoPE branch
+# (M1 is learned-absolute positions; RoPE is a later increment). Names + the
+# per-head arithmetic are kept IDENTICAL to attn11 so the eventual re-point is a
+# clean drop-in (extract-and-re-fold).
+#
+# Source: Vaswani et al. (2017), "Attention Is All You Need", arXiv:1706.03762 —
+# scaled dot-product attention: score = (Q·K)/sqrt(hd), softmax, multi-head split.
+# Grouped-query attention (nkv < nh): Ainslie et al. (2023), arXiv:2305.13245;
+# multi-query (nkv == 1): Shazeer (2019), arXiv:1911.02150.
+#
+# Single sequence of length T, embedding width C, nh query heads, head dim
+# hd = C/nh, and nkv K/V heads (nkv divides nh; nkv == nh is classic MHA).
+# Q/O projections are C x C; K/V projections are C x Ckv where Ckv = nkv*hd —
+# each group of gsz = nh/nkv query heads shares one K/V head. Query heads occupy
+# contiguous column blocks [h*hd, (h+1)*hd) of the (T,C) Q/concat tensors; K/V
+# head g occupies [g*hd, (g+1)*hd) of the (T,Ckv) K/V.
+
+# ---- forward-only attention arena -------------------------------------------
+# The forward caches live in one pre-allocated arena (fixed shapes). Layout — the
+# FIRST five regions of attn11's arena, in the SAME order, so the sub-pointer math
+# below is byte-identical to attn11's (attn11's full arena, which also carries the
+# backward temporaries, drops straight into attn_fwd here). rupantara is
+# forward-only, so it sizes just these five:
+#   Qc       : T*C
+#   Kc Vc    : T*Ckv each
+#   Pc       : nh*T*T   (attention probabilities, causal-masked)
+#   concat   : T*C      (pre-Wo head concatenation)
+fn attn_arena_size(T, C, nh, nkv): i64 {
+    var Ckv = nkv * (C / nh);
+    return 2 * T * C + 2 * T * Ckv + nh * T * T;
+}
+
+# arena sub-pointers (deterministic given dims; Ckv = nkv * (C/nh)) — identical to
+# attn11's _at_Qc.._at_concat (these regions come first, so the offsets match
+# regardless of whether the backward temporaries follow).
+fn _at_Qc(ar): i64 { return ar; }
+fn _at_Kc(ar, T, C): i64 { return ar + (T * C) * 8; }
+fn _at_Vc(ar, T, C, Ckv): i64 { return ar + (T * C + T * Ckv) * 8; }
+fn _at_Pc(ar, T, C, Ckv): i64 { return ar + (T * C + 2 * T * Ckv) * 8; }
+fn _at_concat(ar, T, C, nh, Ckv): i64 { return ar + (T * C + 2 * T * Ckv + nh * T * T) * 8; }
+
+# ---- shared attention core (post-projection) --------------------------------
+# Given Qc(T,C), Kc(T,Ckv), Vc(T,Ckv) it fills Pc(nh,T,T) and concat(T,C): causal
+# scaled-dot-product, each query head h attending its shared K/V head
+# kvb = (h/gsz)*hd. ONE source of truth for the per-head softmax/PV arithmetic.
+fn attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
+    var hd = C / nh;
+    var Ckv = nkv * hd;
+    var gsz = nh / nkv;             # query heads per K/V head (GQA group size)
+    var hd4 = hd - (hd % 4);        # head dim is contiguous -> 4-wide vector body
+    var scale = f64_div(f64_from(1), f64_sqrt(f64_from(hd)));
+    var acc[32];                    # 4-lane dot accumulator
+    var pv[32];                     # 4-lane broadcast buffer
+
+    # zero the full probability buffer (upper triangle stays 0)
+    t_zero(Pc, nh * T * T);
+
+    var h = 0;
+    while (h < nh) {
+        var base = h * hd;          # this query head's block in Q/concat
+        var kvb = (h / gsz) * hd;   # its shared K/V head's block in Kc/Vc
+        var i = 0;
+        while (i < T) {
+            var prow = Pc + (h * T + i) * T * 8;
+            # CAUSAL: query i attends keys j = 0..i.
+            var jhi = i;
+            # raw scores for j = 0..jhi
+            var qbase = Qc + (i * C + base) * 8;
+            var j = 0;
+            while (j <= jhi) {
+                var kbase = Kc + (j * Ckv + kvb) * 8;
+                store64(&acc, f64_from(0)); store64(&acc + 8, f64_from(0));
+                store64(&acc + 16, f64_from(0)); store64(&acc + 24, f64_from(0));
+                var d = 0;
+                while (d < hd4) {
+                    f64v_fmadd(&acc, qbase + d * 8, kbase + d * 8, &acc, 4);
+                    d = d + 4;
+                }
+                var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
+                f64_add(load64(&acc + 16), load64(&acc + 24)));
+                while (d < hd) {
+                    dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
+                    d = d + 1;
+                }
+                store64(prow + j * 8, f64_mul(dot, scale));
+                j = j + 1;
+            }
+            # softmax over j = 0..jhi
+            var mx = load64(prow);
+            j = 1;
+            while (j <= jhi) {
+                var s = load64(prow + j * 8);
+                if (f64_gt(s, mx) == 1) { mx = s; }
+                j = j + 1;
+            }
+            var sum = f64_from(0);
+            j = 0;
+            while (j <= jhi) {
+                var e = f64_exp(f64_sub(load64(prow + j * 8), mx));
+                store64(prow + j * 8, e);
+                sum = f64_add(sum, e);
+                j = j + 1;
+            }
+            var inv = f64_div(f64_from(1), sum);
+            j = 0;
+            while (j <= jhi) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
+            # concat[i, base+d] = sum_j P[i,j] * V[j, kvb+d]  (axpy over the
+            # contiguous head dim d, broadcasting the scalar P[i,j] over j)
+            var cbase = concat + (i * C + base) * 8;
+            var dz = 0;
+            while (dz < hd) { store64(cbase + dz * 8, f64_from(0)); dz = dz + 1; }
+            j = 0;
+            while (j <= jhi) {
+                var pij = load64(prow + j * 8);
+                store64(&pv, pij); store64(&pv + 8, pij);
+                store64(&pv + 16, pij); store64(&pv + 24, pij);
+                var vbase = Vc + (j * Ckv + kvb) * 8;
+                var d = 0;
+                while (d < hd4) {
+                    f64v_fmadd(cbase + d * 8, &pv, vbase + d * 8, cbase + d * 8, 4);
+                    d = d + 4;
+                }
+                while (d < hd) {
+                    store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
+                    f64_mul(pij, load64(vbase + d * 8))));
+                    d = d + 1;
+                }
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        h = h + 1;
+    }
+    return 0;
+}
+
+# ---- forward (MHA / GQA) ----------------------------------------------------
+# x(T,C) -> out(T,C). Projects Q/K/V, runs the shared core, applies Wo. Bias
+# pointers bq/bk/bv/bo may be 0. pos_kind is carried for signature parity with
+# attn11; M1 supports 0 (learned-absolute) only — RoPE (1) is a later increment.
+# rupantara uses rosnet's linear_fwd directly (attn11's qlinear_fwd is a pure
+# passthrough to it off the ternary path, so this is bit-identical).
+fn attn_fwd(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x, out, ar, T, C, nh, nkv, pos_kind): i64 {
+    var Ckv = nkv * (C / nh);
+    var Qc = _at_Qc(ar);
+    var Kc = _at_Kc(ar, T, C);
+    var Vc = _at_Vc(ar, T, C, Ckv);
+    var Pc = _at_Pc(ar, T, C, Ckv);
+    var concat = _at_concat(ar, T, C, nh, Ckv);
+    linear_fwd(x, Wq, bq, Qc, T, C, C);
+    linear_fwd(x, Wk, bk, Kc, T, C, Ckv);
+    linear_fwd(x, Wv, bv, Vc, T, C, Ckv);
+    attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv);
+    linear_fwd(concat, Wo, bo, out, T, C, C);
+    return 0;
+}

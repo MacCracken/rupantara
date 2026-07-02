@@ -1,20 +1,26 @@
 # rupantara — Current State
 
-> **Last refresh**: 2026-07-01 | **Cadence**: every release.
+> **Last refresh**: 2026-07-02 | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
 
-**0.1.0 — unreleased.** **M0: buildable scaffold** for the transformer-forward
-library extracted from attn11. Version probe only (`rupantara_version()`), smoke
-+ 1 test green, dist bundle generated. No transformer forward yet — that is M1.
+**0.2.0 — M1 (rupantara side complete): the transformer forward extracted from
+attn11.** First tagged release. Ported bit-identical: LayerNorm (`ln_fwd`, ε=1e-5),
+GELU (`gelu_fwd`), the attention core + `attn_fwd` (causal softmax + GQA), `mlp_fwd`,
+`embed_fwd` (token + learned-abs pos), `head_fwd`/`softmax_fwd` (weight-tied LM
+head), and the pre-norm `block_fwd` + block-stack `model_fwd` over a packed-param
+layout byte-identical to attn11's MHA/dense block. Suite: `smoke` 1 + `ops` 9 +
+`attn` 12 + `forward` 21 = **43 assertions** green; builds warning-clean.
 
-No released tags yet.
+M1 remaining — **cross-repo, maintainer's go:** the attn11 re-point (make attn11
+consume `dist/rupantara.cyr`) + the full bit-identical-vs-attn11 parity run.
 
 ## Toolchain
 
-Cyrius pin **6.3.27** (`cyrius.cyml`). Deps: **stdlib-only** at M0. M1 adds
-`math` + `rosnet` (see the commented block in `cyrius.cyml`).
+Cyrius pin **6.3.27** (`cyrius.cyml`). Deps: `math` (f64_exp/F64_PI) + `ganita`
+(f64_tanh); **`rosnet` 0.2.0** (`linear_fwd` matmul + tensor helpers) via
+`[deps.rosnet]`, git+tag (no path override — resolves from the release tag).
 
 ## Build artifacts
 

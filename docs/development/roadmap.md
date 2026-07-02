@@ -39,6 +39,18 @@ fixed model+input. Any op ported from attn11 must reproduce attn11's numbers.
 
 ### M1 — extract the minimum GPT-2 forward from attn11 ⚠ cross-repo
 **Goal:** run a GPT-2-small-shaped transformer forward, bit-identical to attn11.
+
+**Progress:** ✅ **rupantara side COMPLETE + green** (suite total 43). Ported
+bit-identical from attn11: `ln_fwd` (ε=1e-5) + `gelu_fwd` (tanh-approx); `rosnet`
+0.2.0 wired for `linear_fwd`; `attn_core_fwd`/`attn_fwd` (causal softmax + GQA,
+forward-only arena); `mlp_fwd`; `embed_fwd` (token + learned-abs pos);
+`head_fwd_row`/`head_fwd` + `softmax_fwd`; the pre-norm `block_fwd` + block-stack
+`model_fwd` over a caller-owned packed-parameter layout byte-identical to attn11's
+MHA/dense block. Tests: `ops.tcyr` (9), `attn.tcyr` (12), `forward.tcyr` (21) —
+attention known-answer, and a `model_fwd` plumbing-parity check (zeroed-weight
+pass-through == embed→LN→head, byte-identical).
+**Remaining:** ⚠ **cross-repo, maintainer's go** — the attn11-side re-point (make
+attn11 consume `dist/rupantara.cyr`) + the full bit-identical-vs-attn11 parity run.
 - **Scope** (new `src/*.cyr` modules, flat): token embed + **learned positional
   embed**; **LayerNorm** fwd; **softmax multi-head causal attention** fwd; **MLP
   (GELU)** fwd; the **pre-norm block**; the **forward over a block stack**;

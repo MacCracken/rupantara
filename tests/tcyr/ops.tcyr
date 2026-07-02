@@ -1,0 +1,72 @@
+# tests/tcyr/ops.tcyr — rupantara leaf ops (M1): LayerNorm + GELU.
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+# |a-b| < tol  (f64 near-equality)
+fn f64_close(a, b, tol): i64 {
+    var d = f64_sub(a, b);
+    if (f64_lt(d, f64_from(0))) { d = f64_sub(f64_from(0), d); }
+    if (f64_lt(d, tol)) { return 1; }
+    return 0;
+}
+
+fn tol_1e6(): i64 { return f64_div(f64_from(1), f64_from(1000000)); }
+fn tol_1e9(): i64 { return f64_div(f64_from(1), f64_from(1000000000)); }
+fn tol_1e3(): i64 { return f64_div(f64_from(1), f64_from(1000)); }
+
+# LayerNorm of [1,2,3] with gamma=1,beta=0 → mean 2, symmetric, mean-0 unit-var.
+fn test_ln_fwd() {
+    var C = 3;
+    var x = alloc(C * 8);
+    store64(x + 0, f64_from(1));
+    store64(x + 8, f64_from(2));
+    store64(x + 16, f64_from(3));
+    var gamma = alloc(C * 8);
+    var beta = alloc(C * 8);
+    var i = 0;
+    while (i < C) { store64(gamma + i * 8, f64_from(1)); store64(beta + i * 8, f64_from(0)); i = i + 1; }
+    var y = alloc(C * 8);
+    var mean = alloc(8);
+    var rstd = alloc(8);
+    ln_fwd(x, gamma, beta, y, mean, rstd, 1, C);
+
+    assert(f64_close(load64(mean), f64_from(2), tol_1e9()), "ln cached mean == 2");
+    assert(f64_close(load64(y + 8), f64_from(0), tol_1e6()), "ln y[1] (x==mu) ~ 0");
+    assert(f64_close(load64(y + 0), f64_sub(f64_from(0), load64(y + 16)), tol_1e9()), "ln symmetric");
+    var s = f64_add(f64_add(load64(y + 0), load64(y + 8)), load64(y + 16));
+    assert(f64_close(s, f64_from(0), tol_1e6()), "ln row-sum ~ 0");
+    var ss = f64_add(f64_add(f64_mul(load64(y + 0), load64(y + 0)),
+    f64_mul(load64(y + 8), load64(y + 8))),
+    f64_mul(load64(y + 16), load64(y + 16)));
+    assert(f64_close(ss, f64_from(3), tol_1e3()), "ln sum-of-squares ~ C (unit var)");
+    return 0;
+}
+
+# GELU: g(0)=0 exact, g(10)~10, g(-10)~0, g(1)~0.8412.
+fn test_gelu_fwd() {
+    var n = 4;
+    var x = alloc(n * 8);
+    var y = alloc(n * 8);
+    store64(x + 0, f64_from(0));
+    store64(x + 8, f64_from(10));
+    store64(x + 16, f64_sub(f64_from(0), f64_from(10)));
+    store64(x + 24, f64_from(1));
+    gelu_fwd(x, y, n);
+
+    assert_eq(load64(y + 0), f64_from(0), "gelu(0) == 0 exactly");
+    assert(f64_close(load64(y + 8), f64_from(10), tol_1e3()), "gelu(10) ~ 10");
+    assert(f64_close(load64(y + 16), f64_from(0), tol_1e3()), "gelu(-10) ~ 0");
+    var e1 = f64_div(f64_from(8412), f64_from(10000));   # 0.8412
+    assert(f64_close(load64(y + 24), e1, f64_div(f64_from(5), f64_from(10000))), "gelu(1) ~ 0.8412");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_ln_fwd();
+    test_gelu_fwd();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(60, rc);

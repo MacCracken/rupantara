@@ -10,6 +10,10 @@ cyrius = "6.3.27"
 # rupantara is a library — no CLI binary. `cyrius build` targets a smoke program
 # that link-checks src/lib.cyr. Consumers pull `dist/rupantara.cyr` via a
 # `[deps.rupantara]` git-tag entry.
+#
+# M1 (the attn11 forward extraction) is now wired: `math` (exp/tanh/gelu/softmax)
+# is in [deps].stdlib and `rosnet` (f64 tensors + matmul) is the [deps.rosnet]
+# entry below.
 [build]
 entry = "programs/smoke.cyr"
 output = "build/rupantara_smoke"
@@ -18,6 +22,12 @@ output = "build/rupantara_smoke"
 # modules (attention/mlp/norm/block/embed) from attn11 here, in dependency order.
 [lib]
 modules = [
+    "src/norm.cyr",
+    "src/act.cyr",
+    "src/attn.cyr",
+    "src/mlp.cyr",
+    "src/embed.cyr",
+    "src/head.cyr",
     "src/blocks.cyr",
 ]
 
@@ -40,4 +50,17 @@ stdlib = [
     "syscalls",
     "assert",
     "bench",
+    "math",
+    "ganita",
 ]
+
+# rosnet 0.2.0 — f64 tensors + BLAS-1 + matmul. rupantara consumes the CPU bundle
+# (dist/rosnet.cyr) for `linear_fwd` (the Q/K/V/O + MLP projections) and the tensor
+# helpers t_alloc / t_zero / tget / tset. Same tag attn11 pins, so the matmul that
+# feeds the extracted forward is bit-identical on both sides (the parity contract).
+# Pinned to the git release tag (no local `path` override) so `cyrius deps` resolves
+# identically for CI and external consumers.
+[deps.rosnet]
+git = "https://github.com/MacCracken/rosnet.git"
+tag = "0.2.0"
+modules = ["dist/rosnet.cyr"]

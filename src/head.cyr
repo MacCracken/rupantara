@@ -1,0 +1,80 @@
+# @public — weight-tied LM head + softmax FORWARD. Ported bit-identical from
+# attn11 `src/model.cyr:head_fwd_row` (the same 4-lane SIMD dot + tree reduction)
+# and the probability half of `src/ops.cyr:softmax_xent_fwd`. attn11 reads its
+# model globals (g_C/g_V/P_tokemb); rupantara takes explicit pointers/dims.
+#
+# WEIGHT TYING: the output unembed IS the token embedding — logits[v] = f · tok_emb[v]
+# (Press & Wolf 2017 arXiv:1608.05859; Inan et al. 2017 arXiv:1611.01462).
+
+# logits_row(V) = f_row(C) @ tok_emb^T — one row. tok_emb: (V,C) row-major.
+fn head_fwd_row(f_row, tok_emb, logits_row, C, V): i64 {
+    var c4 = C - (C % 4);
+    var acc[32];                     # 4-lane dot accumulator (SIMD head)
+    var v = 0;
+    while (v < V) {
+        var erow = tok_emb + v * C * 8;
+        store64(&acc, f64_from(0)); store64(&acc + 8, f64_from(0));
+        store64(&acc + 16, f64_from(0)); store64(&acc + 24, f64_from(0));
+        var c = 0;
+        while (c < c4) {
+            f64v_fmadd(&acc, f_row + c * 8, erow + c * 8, &acc, 4);
+            c = c + 4;
+        }
+        var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
+        f64_add(load64(&acc + 16), load64(&acc + 24)));
+        while (c < C) {
+            dot = f64_add(dot, f64_mul(load64(f_row + c * 8), load64(erow + c * 8)));
+            c = c + 1;
+        }
+        store64(logits_row + v * 8, dot);
+        v = v + 1;
+    }
+    return 0;
+}
+
+# logits(n,V) = f(n,C) @ tok_emb^T over the first n rows. attn11 loops head_fwd_row
+# the same way (head_fwd_n), so the batch and cached-decode paths share arithmetic.
+fn head_fwd(f, tok_emb, logits, n, C, V): i64 {
+    var t = 0;
+    while (t < n) {
+        head_fwd_row(f + t * C * 8, tok_emb, logits + t * V * 8, C, V);
+        t = t + 1;
+    }
+    return 0;
+}
+
+# Row-wise softmax over logits(M,V) -> probs(M,V). Max-subtraction for numerical
+# stability, then normalize. Bit-identical to the probability output of attn11's
+# softmax_xent_fwd (Goodfellow, Bengio, Courville 2016, §4.1/§6.2) — the
+# cross-entropy loss/target half stays in attn11 (training).
+fn softmax_fwd(logits, probs, M, V): i64 {
+    var m = 0;
+    while (m < M) {
+        var row = logits + m * V * 8;
+        var prow = probs + m * V * 8;
+        # max for numerical stability
+        var mx = load64(row);
+        var i = 1;
+        while (i < V) {
+            var lv = load64(row + i * 8);
+            if (f64_gt(lv, mx) == 1) { mx = lv; }
+            i = i + 1;
+        }
+        var sum = f64_from(0);
+        i = 0;
+        while (i < V) {
+            var e = f64_exp(f64_sub(load64(row + i * 8), mx));
+            store64(prow + i * 8, e);
+            sum = f64_add(sum, e);
+            i = i + 1;
+        }
+        var inv = f64_div(f64_from(1), sum);
+        i = 0;
+        while (i < V) {
+            store64(prow + i * 8, f64_mul(load64(prow + i * 8), inv));
+            i = i + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}

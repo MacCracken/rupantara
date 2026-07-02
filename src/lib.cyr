@@ -16,10 +16,33 @@ include "lib/io.cyr"
 include "lib/syscalls.cyr"
 include "lib/assert.cyr"
 include "lib/bench.cyr"
+include "lib/math.cyr"
+# ganita — linear-algebra stdlib; provides f64_tanh (via ganita_f64_tanh) that
+# GELU needs (same source attn11 uses). math.cyr supplies f64_exp + F64_PI.
+include "lib/ganita.cyr"
+
+# ================================================================
+# rosnet dependency — f64 tensors + BLAS-1 + matmul (dist bundle, flat). Supplies
+# `linear_fwd` (the Q/K/V/O + MLP projections) and t_alloc / t_zero / tget / tset.
+# Pulled by [deps.rosnet] in cyrius.cyml; the resolved artifact lands at lib/.
+# ================================================================
+include "lib/rosnet.cyr"
 
 # ================================================================
 # rupantara domain modules — flat, dependency order.
-# M1 adds the extracted transformer-forward modules (attention / mlp / norm /
-# block / embed) from attn11 here.
+# M1: the extracted transformer-forward ops from attn11.
+#   norm  — LayerNorm forward (leaf; f64 + math)
+#   act   — GELU forward (leaf; f64 + math)
+#   attn  — attention core + attn_fwd (rosnet linear_fwd; causal softmax + GQA)
+#   mlp   — MLP forward (linear_fwd -> gelu -> linear_fwd)
+#   embed — token + learned-positional embedding
+#   head  — weight-tied LM head + softmax
+#   blocks— pre-norm block + block-stack model forward (+ version probe)
 # ================================================================
+include "src/norm.cyr"
+include "src/act.cyr"
+include "src/attn.cyr"
+include "src/mlp.cyr"
+include "src/embed.cyr"
+include "src/head.cyr"
 include "src/blocks.cyr"

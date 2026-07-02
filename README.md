@@ -14,8 +14,12 @@ attn11-the-binary**. Pure Cyrius.
 
 ## Status
 
-**0.1.0 — M0 buildable scaffold** (version probe only; smoke + CI green). The real
-forward is extracted from attn11 at **M1** — see
+**0.2.0 — M1 the transformer forward (rupantara side)** — the GPT-2-shaped forward
+extracted bit-identical from attn11: token + learned-positional embedding,
+LayerNorm, causal softmax multi-head attention (+ GQA), GELU MLP, the pre-norm
+block, the block-stack forward, and the weight-tied LM head + softmax. Runs green
+standalone (43 assertions). The **cross-repo attn11 re-point** + full parity run
+is the remaining step (its own go) — see
 [`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin **6.3.27**.
 
 ## Build & test
