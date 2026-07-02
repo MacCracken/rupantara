@@ -63,12 +63,13 @@ rupantara's `ru_*`, keeping the GPU (`--gpu` / `--gpu-tc`) and bidirectional
   `model_fwd` orchestration and the **row/decode, MLA, SSM, linear-attention, MoE,
   MTP, and diffusion (`g_bidir`)** paths, which rupantara does not implement. These
   remain a second copy in attn11 and are **not** de-duplicated by this re-fold.
-- **Consequence for rupantara's own composition ops** (`ru_embed_fwd`,
-  `ru_head_fwd`, `ru_model_fwd`, …): they are ported verbatim + pass rupantara's
-  internal known-answer / plumbing tests, but attn11 does **not** exercise them, so
-  they are **not** cross-validated against attn11. anukūlana is their first real
-  consumer; a rupantara↔attn11 whole-forward parity fixture is still worthwhile
-  before anukūlana's fidelity gate leans on `ru_model_fwd`.
+- **Composition ops** (`ru_embed_fwd`, `ru_head_fwd`, `ru_model_fwd`, …) — attn11
+  keeps its own (they read globals / carry training concerns), so they are not
+  *delegated*, but they ARE now **cross-validated**: **`test_rupantara_parity`** in
+  attn11's suite feeds attn11's `g_params` straight into `ru_model_fwd` and asserts
+  it matches attn11's `model_forward` **bit-for-bit** (`diffs==0`, `maxrel=0`) across
+  MHA ±bias / GQA / MQA / 1–3 blocks (attn11 1057 green, 2026-07-02). So rupantara's
+  whole forward is proven equal to attn11's — anukūlana can rely on `ru_model_fwd`.
 
 ## Gate (the live parity proof) — GREEN
 

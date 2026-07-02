@@ -1,0 +1,190 @@
+# @public — rupantara KV-cache decode (M2): the incremental single-row forward.
+# Process ONE token at window position `pos` against per-layer K/V caches, append
+# this position's K/V, and produce its logits. Ported bit-identical from attn11
+# `src/attn.cyr:attn_core_fwd_row / attn_fwd_row` + `src/model.cyr:model_fwd_row`
+# (learned-absolute positions; causal MHA/GQA — rupantara's M1 scope: no RoPE /
+# MLA / SSM / MoE). Reuses ru_ln_fwd / ru_mlp_fwd / ru_head_fwd_row on one row.
+#
+# ARITHMETIC CONTRACT (attn11 docs/architecture/003; Pope et al. 2022,
+# arXiv:2211.05102 — KV-cache inference): each op here is the same kernel the
+# batch path runs, on one row, in the same accumulation order (rosnet linear_fwd
+# rows are independent, and causal attention makes position `pos` depend only on
+# positions 0..pos), so a token's logits are BIT-IDENTICAL to row `pos` of the
+# uncached ru_model_fwd over the same window. Pinned by tests/tcyr/decode.tcyr.
+
+# ---- shared single-row attention core --------------------------------------
+# q_row(C) at window position `pos`, K/V caches Kc/Vc ((>=pos+1, Ckv) holding
+# positions 0..pos) -> concat_row(C): per-head causal softmax/PV for ONE query
+# attending cache rows 0..pos. The single-row mirror of ru_attn_core_fwd — same
+# scale 1/sqrt(hd), GQA head-sharing, 4-lane fmadd dot, log-sum-exp softmax, PV
+# axpy. prow: caller scratch (>= pos+1 f64).
+fn ru_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv): i64 {
+    var hd = C / nh;
+    var Ckv = nkv * hd;
+    var gsz = nh / nkv;
+    var hd4 = hd - (hd % 4);
+    var scale = f64_div(f64_from(1), f64_sqrt(f64_from(hd)));
+    var acc[32];                    # 4-lane dot accumulator (32 bytes = 4 f64)
+    var pv[32];                     # 4-lane broadcast buffer
+    var h = 0;
+    while (h < nh) {
+        var base = h * hd;          # this query head's block in q_row/concat_row
+        var kvb = (h / gsz) * hd;   # its shared K/V head's block in Kc/Vc
+        var qbase = q_row + base * 8;
+        var j = 0;
+        while (j <= pos) {
+            var kbase = Kc + (j * Ckv + kvb) * 8;
+            store64(&acc, f64_from(0)); store64(&acc + 8, f64_from(0));
+            store64(&acc + 16, f64_from(0)); store64(&acc + 24, f64_from(0));
+            var d = 0;
+            while (d < hd4) {
+                f64v_fmadd(&acc, qbase + d * 8, kbase + d * 8, &acc, 4);
+                d = d + 4;
+            }
+            var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
+            f64_add(load64(&acc + 16), load64(&acc + 24)));
+            while (d < hd) {
+                dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
+                d = d + 1;
+            }
+            store64(prow + j * 8, f64_mul(dot, scale));
+            j = j + 1;
+        }
+        var mx = load64(prow);
+        j = 1;
+        while (j <= pos) {
+            var s = load64(prow + j * 8);
+            if (f64_gt(s, mx) == 1) { mx = s; }
+            j = j + 1;
+        }
+        var sum = f64_from(0);
+        j = 0;
+        while (j <= pos) {
+            var e = f64_exp(f64_sub(load64(prow + j * 8), mx));
+            store64(prow + j * 8, e);
+            sum = f64_add(sum, e);
+            j = j + 1;
+        }
+        var inv = f64_div(f64_from(1), sum);
+        j = 0;
+        while (j <= pos) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
+        var cbase = concat_row + base * 8;
+        var dz = 0;
+        while (dz < hd) { store64(cbase + dz * 8, f64_from(0)); dz = dz + 1; }
+        j = 0;
+        while (j <= pos) {
+            var pij = load64(prow + j * 8);
+            store64(&pv, pij); store64(&pv + 8, pij);
+            store64(&pv + 16, pij); store64(&pv + 24, pij);
+            var vbase = Vc + (j * Ckv + kvb) * 8;
+            var d = 0;
+            while (d < hd4) {
+                f64v_fmadd(cbase + d * 8, &pv, vbase + d * 8, cbase + d * 8, 4);
+                d = d + 4;
+            }
+            while (d < hd) {
+                store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
+                f64_mul(pij, load64(vbase + d * 8))));
+                d = d + 1;
+            }
+            j = j + 1;
+        }
+        h = h + 1;
+    }
+    return 0;
+}
+
+# ---- cached single-row attention: project x_row, append K/V at pos, core, out proj
+# x_row(1,C) -> out_row(1,C), appending this position's K/V to Kc/Vc ((T,Ckv),
+# must already hold 0..pos-1). Uses rosnet linear_fwd (M=1); learned-pos only.
+fn ru_attn_fwd_row(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x_row, out_row,
+Kc, Vc, prow, concat_row, q_row, pos, C, nh, nkv): i64 {
+    var Ckv = nkv * (C / nh);
+    linear_fwd(x_row, Wq, bq, q_row, 1, C, C);
+    linear_fwd(x_row, Wk, bk, Kc + pos * Ckv * 8, 1, C, Ckv);
+    linear_fwd(x_row, Wv, bv, Vc + pos * Ckv * 8, 1, C, Ckv);
+    ru_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv);
+    linear_fwd(concat_row, Wo, bo, out_row, 1, C, C);
+    return 0;
+}
+
+# ---- KV cache layout: [ K: NL*(T*Ckv) ][ V: NL*(T*Ckv) ], caller-owned --------
+# t_alloc(ru_decode_kv_count(cfg)) once, reuse across a decode sequence.
+fn ru_decode_kv_count(cfg): i64 { return 2 * _cfg_NL(cfg) * _cfg_T(cfg) * _cfg_Ckv(cfg); }
+fn _ru_kv_k(kv, cfg, L): i64 { return kv + (L * _cfg_T(cfg) * _cfg_Ckv(cfg)) * 8; }
+fn _ru_kv_v(kv, cfg, L): i64 { return kv + ((_cfg_NL(cfg) + L) * _cfg_T(cfg) * _cfg_Ckv(cfg)) * 8; }
+
+# ---- cached single-token model forward (one decode step) --------------------
+# `tok` at window position `pos`; `kv` holds per-layer K/V for positions 0..pos-1.
+# Appends this token's K/V and writes its logits(V). Bit-identical to row `pos` of
+# the uncached ru_model_fwd over the same tokens. Allocates row scratch via t_alloc
+# (a reference forward); the KV cache persists across steps (caller-owned).
+fn ru_model_fwd_row(cfg, params, tok, pos, kv, logits): i64 {
+    var V = _cfg_V(cfg);
+    var C = _cfg_C(cfg);
+    var T = _cfg_T(cfg);
+    var nh = _cfg_nh(cfg);
+    var nkv = _cfg_nkv(cfg);
+    var NL = _cfg_NL(cfg);
+    var F = _cfg_F(cfg);
+    var rx = t_alloc(C);
+    var ra = t_alloc(C);
+    var rm = t_alloc(1);
+    var rr = t_alloc(1);
+    var rattn = t_alloc(C);
+    var rprow = t_alloc(T);
+    var rconcat = t_alloc(C);
+    var rq = t_alloc(C);
+    var rb = t_alloc(C);
+    var rm2 = t_alloc(1);
+    var rr2 = t_alloc(1);
+    var rfc = t_alloc(F);
+    var rgg = t_alloc(F);
+    var rmlp = t_alloc(C);
+    var af = t_alloc(C);
+    var meanf = t_alloc(1);
+    var rstdf = t_alloc(1);
+    # embed this token at position `pos` (token + learned-absolute position)
+    var tokemb = _p_tokemb(params);
+    var posemb = _p_posemb(params, cfg);
+    var c = 0;
+    while (c < C) {
+        var e = f64_add(load64(tokemb + (tok * C + c) * 8), load64(posemb + (pos * C + c) * 8));
+        store64(rx + c * 8, e);
+        c = c + 1;
+    }
+    var L = 0;
+    while (L < NL) {
+        var pblk = params + _ru_blk_base(cfg, L) * 8;
+        # x' = rx + Attn(LN1(rx))
+        ru_ln_fwd(rx, pblk + _ru_o_ln1g(cfg) * 8, pblk + _ru_o_ln1b(cfg) * 8, ra, rm, rr, 1, C);
+        ru_attn_fwd_row(pblk + _ru_o_Wq(cfg) * 8, _bq(cfg, pblk), pblk + _ru_o_Wk(cfg) * 8, _bk(cfg, pblk),
+        pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
+        ra, rattn, _ru_kv_k(kv, cfg, L), _ru_kv_v(kv, cfg, L), rprow, rconcat, rq, pos, C, nh, nkv);
+        c = 0;
+        while (c < C) { store64(rx + c * 8, f64_add(load64(rx + c * 8), load64(rattn + c * 8))); c = c + 1; }
+        # x'' = rx + MLP(LN2(rx))
+        ru_ln_fwd(rx, pblk + _ru_o_ln2g(cfg) * 8, pblk + _ru_o_ln2b(cfg) * 8, rb, rm2, rr2, 1, C);
+        ru_mlp_fwd(rb, pblk + _ru_o_Wfc(cfg) * 8, pblk + _ru_o_bfc(cfg) * 8, pblk + _ru_o_Wproj(cfg) * 8,
+        pblk + _ru_o_bproj(cfg) * 8, rfc, rgg, rmlp, 1, C, F);
+        c = 0;
+        while (c < C) { store64(rx + c * 8, f64_add(load64(rx + c * 8), load64(rmlp + c * 8))); c = c + 1; }
+        L = L + 1;
+    }
+    ru_ln_fwd(rx, _p_lnfg(params, cfg), _p_lnfb(params, cfg), af, meanf, rstdf, 1, C);
+    ru_head_fwd_row(af, _p_tokemb(params), logits, C, V);
+    return 0;
+}
+
+# ---- greedy next-token: argmax over a logits(V) row -------------------------
+fn ru_argmax(logits, V): i64 {
+    var best = 0;
+    var bv = load64(logits);
+    var i = 1;
+    while (i < V) {
+        var lv = load64(logits + i * 8);
+        if (f64_gt(lv, bv) == 1) { bv = lv; best = i; }
+        i = i + 1;
+    }
+    return best;
+}

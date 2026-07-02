@@ -29,6 +29,7 @@ modules = [
     "src/embed.cyr",
     "src/head.cyr",
     "src/blocks.cyr",
+    "src/decode.cyr",
 ]
 
 [deps]

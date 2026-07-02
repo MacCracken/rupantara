@@ -6,6 +6,37 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-02
+
+**KV-cache decode (M2) + whole-forward parity proof.** rupantara now runs an
+incremental cached decode **bit-identical** to the uncached forward, and its whole
+`ru_model_fwd` composition is **proven bit-identical** to attn11's `model_forward`.
+Additive over 0.3.0 (new `ru_*_row` / `ru_decode_*` / `ru_argmax` surface; no breaking change).
+
+### Added
+- **M2 — KV-cache decode** (`src/decode.cyr`). Incremental single-token forward:
+  `ru_attn_core_fwd_row` / `ru_attn_fwd_row` (single-row causal attention core +
+  Q/K/V/O projections, appending to per-layer K/V caches — ported from attn11
+  `attn_*_fwd_row`), `ru_model_fwd_row` (one decode step: embed@pos → pre-norm
+  blocks over the caches → final LN → weight-tied head), `ru_decode_kv_count` +
+  `_ru_kv_k`/`_ru_kv_v` (caller-owned cache layout `[K:NL·T·Ckv][V:NL·T·Ckv]`), and
+  `ru_argmax` (greedy next-token). Reuses `ru_ln_fwd`/`ru_mlp_fwd`/`ru_head_fwd_row`
+  on one row; learned-absolute positions, causal MHA/GQA (M1 scope). **Bit-identical
+  to the uncached path:** `tests/tcyr/decode.tcyr` asserts cached decode ==
+  `ru_model_fwd` bit-for-bit (`diffs==0`) across 4 configs (MHA ±bias / GQA `nkv<nh`
+  / MQA `nkv=1` / 1–3 blocks) + a greedy-generation smoke. Suite 43 → **48**.
+
+### Verified
+- **Whole-forward parity vs attn11 — PROVEN bit-identical** (2026-07-02). A new
+  `test_rupantara_parity` in **attn11's** grad-check suite feeds attn11's `g_params`
+  directly into `ru_model_fwd` and asserts the logits match attn11's own
+  `model_forward` **bit-for-bit** (`diffs==0`, `maxrel=0.000000000`) across 4 configs
+  (MHA ±bias / GQA `nkv<nh` / MQA `nkv=1` / 1–3 blocks), in one binary — no offline
+  compare. This closes the 0.3.0 "Known limitations": rupantara's **composition** ops
+  (`ru_embed_fwd`/`ru_head_fwd`/`ru_model_fwd`/…), not just the delegated leaf ops,
+  are now cross-validated against attn11. No rupantara code change — the proof lives
+  where both forwards coexist (attn11 links `lib/rupantara.cyr`). attn11 suite 1057 green.
+
 ## [0.3.0] — 2026-07-02
 
 **Re-fold — `ru_*` namespacing + attn11 consumes rupantara's leaf ops.** The full

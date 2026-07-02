@@ -46,3 +46,4 @@ include "src/mlp.cyr"
 include "src/embed.cyr"
 include "src/head.cyr"
 include "src/blocks.cyr"
+include "src/decode.cyr"      # M2: KV-cache incremental decode (ru_*_row)

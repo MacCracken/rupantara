@@ -14,19 +14,21 @@ attn11-the-binary**. Pure Cyrius.
 
 ## Status
 
-**0.2.0 — M1 the transformer forward (rupantara side)** — the GPT-2-shaped forward
-ported verbatim from attn11: token + learned-positional embedding, LayerNorm,
-causal softmax multi-head attention (+ GQA), GELU MLP, the pre-norm block, the
-block-stack forward, and the weight-tied LM head + softmax. Runs green standalone
-(43 assertions). The full public + private op surface is `ru_*`-namespaced.
+**0.4.0 — transformer forward + attn11 re-fold + KV-cache decode.** The
+GPT-2-shaped forward ported verbatim from attn11: token + learned-positional
+embedding, LayerNorm, causal softmax multi-head attention (+ GQA/MQA), GELU MLP,
+the pre-norm block, block-stack forward, weight-tied LM head + softmax. Full public
++ private op surface is `ru_*`-namespaced. Runs green standalone (**48 assertions**).
 
-**Re-fold landed (2026-07-02):** attn11 now **consumes** rupantara's three leaf
-ops — `ru_ln_fwd`, `ru_gelu_fwd`, `ru_attn_core_fwd` (causal) — and its full
-grad-check suite is green in one binary, so those three are **proven bit-identical**
-(the real parity gate, no offline compare). rupantara's **composition** ops
-(`ru_embed_fwd`, `ru_head_fwd`, `ru_model_fwd`, …) are ported + internally tested,
-but attn11 keeps its own, so they are **not yet cross-validated** against attn11 —
-anukūlana is their first real consumer. See
+**Re-fold + parity (2026-07-02):** attn11 **consumes** rupantara's leaf ops
+(`ru_ln_fwd`, `ru_gelu_fwd`, `ru_attn_core_fwd`) — its full 1049 grad-check suite is
+green in one binary — and rupantara's **whole** `ru_model_fwd` is **proven
+bit-identical** to attn11's `model_forward` on identical params
+(`test_rupantara_parity` in attn11's suite: 4 configs, `diffs==0`, `maxrel=0`).
+
+**KV-cache decode (M2):** `ru_model_fwd_row` runs an incremental cached forward
+**bit-identical to the uncached path** (`tests/tcyr/decode.tcyr`, 4 configs) with
+per-layer K/V caches + `ru_argmax` greedy next-token. See
 [`docs/development/roadmap.md`](docs/development/roadmap.md) +
 [`docs/development/refold-plan.md`](docs/development/refold-plan.md). Cyrius pin **6.3.27**.
 

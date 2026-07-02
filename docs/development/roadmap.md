@@ -54,12 +54,12 @@ public + 28 private; `comm -12` vs attn11 = empty) and **attn11 consumes
 rupantara's three leaf ops** (`ru_ln_fwd`, `ru_gelu_fwd`, `ru_attn_core_fwd`
 causal). attn11's full grad-check suite is **1049 green in one binary** with them
 delegated → those three are **proven bit-identical** (the real parity gate; no
-offline compare). **Remaining (honest):** the **composition** ops (`ru_embed_fwd` /
-`ru_head_fwd` / `ru_model_fwd` / …) are *not* cross-validated — attn11 keeps its
-own (incompatible global-reading signatures + training concerns). A
-rupantara↔attn11 whole-`ru_model_fwd` parity fixture (fixed tiny model + input,
-logits bit-for-bit) is the true M1-acceptance gap and should precede anukūlana's
-fidelity gate.
+offline compare). **✅ Composition parity PROVEN (2026-07-02):** rupantara's whole
+`ru_model_fwd` (embed → blocks → final LN → weight-tied head) is **bit-identical**
+to attn11's `model_forward` on identical `g_params` — `test_rupantara_parity` in
+attn11's suite, `diffs==0` / `maxrel=0.000000000` across MHA ±bias / GQA / MQA /
+1–3 blocks (attn11 **1057** green). The M1-acceptance parity gap is CLOSED;
+anukūlana's fidelity gate can lean on `ru_model_fwd`.
 - **Scope** (new `src/*.cyr` modules, flat): token embed + **learned positional
   embed**; **LayerNorm** fwd; **softmax multi-head causal attention** fwd; **MLP
   (GELU)** fwd; the **pre-norm block**; the **forward over a block stack**;
@@ -76,12 +76,20 @@ fidelity gate.
   on a fixed tiny model + input (a parity test); attn11 stays green consuming
   rupantara (its full suite unchanged).
 
-### M2 — KV-cache decode
+### M2 — KV-cache decode ✅ DONE (2026-07-02)
 - Incremental forward with a KV cache, **bit-identical to the uncached forward**
   (attn11's guarantee). Greedy/argmax next-token. (The full sampler zoo —
   temperature/top-k/top-p/beam — is the Autoregressive Type-2 reference's home;
   keep the boundary.)
-- **Acceptance:** `tests/tcyr/decode.tcyr` — cached vs uncached forward identical.
+- **Shipped** in `src/decode.cyr`: `ru_attn_core_fwd_row` / `ru_attn_fwd_row`
+  (single-row causal core + projections, ported from attn11 `attn_*_fwd_row`),
+  `ru_model_fwd_row` (one decode step: embed@pos → blocks over per-layer K/V caches
+  → final LN → weight-tied head), `ru_decode_kv_count` + `_ru_kv_k`/`_ru_kv_v`
+  (caller-owned cache layout), and `ru_argmax` (greedy next-token). Reuses
+  `ru_ln_fwd`/`ru_mlp_fwd`/`ru_head_fwd_row` on one row.
+- **Acceptance MET:** `tests/tcyr/decode.tcyr` — cached decode == uncached
+  `ru_model_fwd` **bit-for-bit** (`diffs==0`) across 4 configs (MHA ±bias / GQA /
+  MQA / 1–3 blocks) + a greedy-generation smoke; suite 43 → **48** green.
 
 ### M3 — architecture breadth (demand-gated)
 - Add per consumer need: **RoPE** positions, **GQA/MQA**, **SwiGLU**, **RMSNorm**
