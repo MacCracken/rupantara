@@ -393,9 +393,9 @@ fn ru_softmax_fwd(logits, probs, M, V): i64 {
 # With attn bias, bq(C) bk(Ckv) bv(Ckv) bo(C) are appended after the base block
 # (Ckv = nkv*(C/nh)); the base weight offsets are unchanged.
 
-# Packed version int: major*10000 + minor*100 + patch (0.2.0 -> 200).
+# Packed version int: major*10000 + minor*100 + patch (0.3.0 -> 300).
 fn rupantara_version(): i64 {
-    return 200;
+    return 300;
 }
 
 # ---- config descriptor (8 i64) ---------------------------------------------
