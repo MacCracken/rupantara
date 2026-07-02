@@ -1,0 +1,105 @@
+# rupantara — Roadmap (march to v1.0)
+
+> **For a secondary agent picking this up cold.** Self-contained plan. Read this
+> + `CLAUDE.md` (conventions) + `docs/adr/0001-rupantara-scope.md` (scope).
+> rupantara is the transformer **forward** library extracted from attn11 — not
+> training, not tensors, not the importer. Pre-1.0: surface may move, no freeze
+> until v1.0.
+
+---
+
+## Working agreement
+
+- **Build/test:** `make build` · `make test` · `make dist`. Pin in `cyrius.cyml`.
+- **Flat modules:** stdlib includes only in `src/lib.cyr`; `src/*.cyr` flat. New
+  module → `src/lib.cyr` + `cyrius.cyml [lib].modules` (dep order). The LSP flags
+  cross-module symbols as "undefined" in standalone files — flat-module pattern;
+  the build is authoritative.
+- **Definition of done each bite:** `make test` green · `cyrius fmt` clean ·
+  `cyrius lint` no `warn ` · `make dist` regenerated · CHANGELOG `[Unreleased]`.
+- **Do NOT bump VERSION or git** — the maintainer cuts releases; work accretes
+  under `[Unreleased]`.
+
+## Discipline (inherited from attn11)
+
+Cyrius-native, no BLAS/libc/autodiff. Where a gradient exists it is
+**finite-difference-gated** (attn11's rule) — but rupantara is forward-focused, so
+its primary correctness gate is **bit-identical parity vs attn11's forward** on a
+fixed model+input. Any op ported from attn11 must reproduce attn11's numbers.
+
+---
+
+## Shipped
+
+- **M0 ✅** buildable scaffold (version probe; smoke + CI green; `smoke.tcyr` 1).
+
+---
+
+## Remaining milestones
+
+### M1 — extract the minimum GPT-2 forward from attn11 ⚠ cross-repo
+**Goal:** run a GPT-2-small-shaped transformer forward, bit-identical to attn11.
+- **Scope** (new `src/*.cyr` modules, flat): token embed + **learned positional
+  embed**; **LayerNorm** fwd; **softmax multi-head causal attention** fwd; **MLP
+  (GELU)** fwd; the **pre-norm block**; the **forward over a block stack**;
+  **weight-tied LM head + softmax**. Port from attn11 `ops.cyr` / `attn.cyr` /
+  `tensor.cyr` (read them; port the converged shape, keep attn11's numerics).
+- **Deps:** add `math` (exp/tanh/gelu/softmax) to `[deps].stdlib` and wire
+  `[deps.rosnet]` (git+path+tag 0.2.0, `dist/rosnet.cyr`) for matmul — see the
+  commented block in `cyrius.cyml`.
+- **⚠ CROSS-REPO (needs its own explicit go):** re-point **attn11** to consume
+  `dist/rupantara.cyr` (attn11 becomes a thin consumer of its own extracted
+  forward — the kashi/sandhi extract-and-re-fold pattern). This edits the
+  **attn11 repo** — do NOT touch attn11 without the maintainer's go.
+- **Acceptance:** rupantara reproduces attn11's forward **logits bit-identically**
+  on a fixed tiny model + input (a parity test); attn11 stays green consuming
+  rupantara (its full suite unchanged).
+
+### M2 — KV-cache decode
+- Incremental forward with a KV cache, **bit-identical to the uncached forward**
+  (attn11's guarantee). Greedy/argmax next-token. (The full sampler zoo —
+  temperature/top-k/top-p/beam — is the Autoregressive Type-2 reference's home;
+  keep the boundary.)
+- **Acceptance:** `tests/tcyr/decode.tcyr` — cached vs uncached forward identical.
+
+### M3 — architecture breadth (demand-gated)
+- Add per consumer need: **RoPE** positions, **GQA/MQA**, **SwiGLU**, **RMSNorm**
+  — e.g. when importing a Llama-class model requires them. Each ported from attn11
+  + parity-tested. Don't build all up front.
+
+### M4 — hardening + fuzz + bench
+- Validate model-config shape (dims/layers/heads) against buffer/tensor sizes;
+  reject malformed configs. Fuzz the config/forward entry. Bench forward
+  throughput (tokens/s) → `docs/benchmarks.md`.
+
+### M5 — security audit + SECURITY.md
+- 6-dimension audit (memory safety · integer overflow · shape/bounds on untrusted
+  configs · resource caps · fail-loud). Report + `SECURITY.md`.
+
+### v1.0 — freeze & clean cut
+- `docs/api.md` (frozen forward surface) + `STABILITY.md`; ≥1 downstream consumer
+  green (anukūlana runs a GPT-2 forward through rupantara); maintainer bumps
+  VERSION → 1.0.0 + tags.
+
+---
+
+## v1.0 criteria
+
+- [ ] Public API frozen + documented (`docs/api.md` + `STABILITY.md`)
+- [ ] **Bit-identical parity vs attn11 forward** (the core gate) + full coverage
+- [ ] KV-cache decode == uncached
+- [ ] Fuzz clean (malformed configs rejected) + bench (`docs/benchmarks.md`)
+- [ ] Security audit + `SECURITY.md`
+- [ ] ≥1 downstream consumer green (anukūlana)
+- [ ] CHANGELOG complete; version consistency (CI docs gate)
+
+---
+
+## Gates / relations
+
+- **Deps:** `rosnet` (matmul) + `math` (from M1). CPU-only.
+- **Cross-repo:** M1's attn11 re-point edits the **attn11** repo → its own go.
+- **Consumers:** `anukūlana` (Type-3 import), the murti load-seam. Keep the
+  forward API stable for them.
+- **Ecosystem:** the AGNOS planning docs `type3-weight-import.md` (gap #1, where
+  rupantara is the transformer-forward prerequisite) + `software-port-path.md`.

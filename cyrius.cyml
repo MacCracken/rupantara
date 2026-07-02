@@ -1,0 +1,43 @@
+[package]
+name = "rupantara"
+version = "${file:VERSION}"
+description = "rupantara (रूपान्तर — transformation / metamorphosis) — sovereign transformer FORWARD blocks (attention / MLP / LayerNorm / RMSNorm / pre-norm block / positional embeddings / KV-cache decode) for AGNOS, extracted from attn11 so consumers (anukulana, the murti load-seam) run a transformer without depending on attn11-the-binary. Pure Cyrius; M0 is a buildable scaffold."
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/rupantara"
+language = "cyrius"
+cyrius = "6.3.27"
+
+# rupantara is a library — no CLI binary. `cyrius build` targets a smoke program
+# that link-checks src/lib.cyr. Consumers pull `dist/rupantara.cyr` via a
+# `[deps.rupantara]` git-tag entry.
+[build]
+entry = "programs/smoke.cyr"
+output = "build/rupantara_smoke"
+
+# `[lib]` feeds `cyrius distlib`. M1 adds the extracted transformer-forward
+# modules (attention/mlp/norm/block/embed) from attn11 here, in dependency order.
+[lib]
+modules = [
+    "src/blocks.cyr",
+]
+
+[deps]
+# M0 scaffold is stdlib-only. M1 (the attn11 forward extraction) adds `math`
+# (exp/tanh/gelu/softmax) and `rosnet` (f64 tensors + matmul):
+#   stdlib += "math"
+#   [deps.rosnet]
+#   git = "https://github.com/MacCracken/rosnet.git"
+#   path = "../rosnet"
+#   tag = "0.2.0"
+#   modules = ["dist/rosnet.cyr"]
+stdlib = [
+    "string",
+    "fmt",
+    "alloc",
+    "io",
+    "vec",
+    "str",
+    "syscalls",
+    "assert",
+    "bench",
+]

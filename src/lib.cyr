@@ -1,0 +1,25 @@
+# @public — rupantara library include chain.
+# rupantara (रूपान्तर — transformation) — sovereign transformer forward blocks.
+#
+# Stdlib includes live ONLY in this file; domain modules (src/*.cyr) are flat so
+# `cyrius distlib` concatenates a compile-clean `dist/rupantara.cyr`.
+
+# ================================================================
+# Standard library (M0 minimal; M1 adds math + rosnet)
+# ================================================================
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/syscalls.cyr"
+include "lib/assert.cyr"
+include "lib/bench.cyr"
+
+# ================================================================
+# rupantara domain modules — flat, dependency order.
+# M1 adds the extracted transformer-forward modules (attention / mlp / norm /
+# block / embed) from attn11 here.
+# ================================================================
+include "src/blocks.cyr"
