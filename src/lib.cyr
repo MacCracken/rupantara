@@ -43,6 +43,7 @@ include "src/norm.cyr"
 include "src/act.cyr"
 include "src/attn.cyr"
 include "src/mlp.cyr"
+include "src/gpu.cyr"         # AGNOS gfx90c f64 projection offload (linear_fwd_gpu; #83, bit-identical)
 include "src/embed.cyr"
 include "src/head.cyr"
 include "src/blocks.cyr"

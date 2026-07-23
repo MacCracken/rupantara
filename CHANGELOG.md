@@ -6,6 +6,38 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-07-23
+
+**AGNOS GPU offload (the 1.54.x GPU crown / C6): rupantara's f64 projection matmul can run on the AMD gfx90c
+shader cores.** Additive and OFF by default — `linear_fwd_gpu` is a new peer of `linear_fwd`; `ru_mlp_fwd` /
+`ru_block_fwd` are unchanged — so the CPU forward and the attn11 parity contract are untouched.
+
+### Added
+- **`src/gpu.cyr` — `linear_fwd_gpu(x, W, b, y, M, K, N)`**, a bit-identical peer of rosnet `linear_fwd` that
+  tiles the matmul into 8×8×8 blocks and dispatches each on the AMD Cezanne gfx90c shader cores via the AGNOS
+  ring-3 syscall `#83` (`gpu_dispatch_f64`), one tile per call, gathering strided sub-blocks CPU-side.
+  **Bit-identical** (not tolerance) for the **bias-free, K≤8** regime: `#83` computes `C=A*B` unfused
+  (`v_mul_f64` then `v_add_f64`, k-ascending) and `linear_fwd`'s f64 body is cyrius `EMIT_F64V_FMADD` = SSE2
+  `mulpd+addpd` (also unfused, two roundings, same order), and K≤8 is a single k-tile (no cross-tile f64
+  reassociation). On a non-AGNOS target, or when `#83` returns <0 (no GPU / boot self-test unproven), each
+  tile falls back to `linear_fwd` — identical result, so the tiling is exercisable off-hardware. Returns the
+  count of tiles that ran on the GPU. ⚠ K>8 (cross-tile accumulation) is a ~1 ULP tolerance match, not
+  bit-exact — a follow-on; bias must be 0 (the association would otherwise change).
+- **`programs/gpulayer.cyr` — the crown proof.** Runs a real bias-free MLP up-projection
+  `linear_fwd(x, Wfc, 0, fc, 8, 8, 32)` (the first op of `ru_mlp_fwd`) twice — CPU `linear_fwd` vs
+  `linear_fwd_gpu` — on deterministic **fractional** f64 data (products not exactly representable, so a match
+  proves the GPU rounds exactly like the CPU) and byte-compares the 2048-byte outputs. Exit code is the
+  oracle: **95** = byte-identical AND all 4 tiles on the GPU (crown); **96** = byte-identical, 0 GPU tiles
+  (host/QEMU — plumbing proven, no GPU); **90** = byte mismatch (the guard against a silently-wrong gather).
+
+### Verified
+- **Tiling bit-identical on host** (2026-07-23): `build/gpulayer` exits **96** — `linear_fwd_gpu` (CPU-tiled)
+  is byte-for-byte equal to the production `linear_fwd` over the full 8×32 output, proving the gather/scatter
+  arithmetic. Both `programs/gpulayer.cyr` and `programs/smoke.cyr` build clean `--agnos`.
+- The GPU `#83` dispatch itself is **iron-only** (QEMU has no AMD GPU → `#83` returns −1). The archaemenid
+  crown burn (`run /bin/gpulayer` → `run: exit 95`) is the remaining confirmation, tracked in agnosticos
+  `iron-nuc-zen-log.md`.
+
 ## [0.4.0] — 2026-07-02
 
 **KV-cache decode (M2) + whole-forward parity proof.** rupantara now runs an

@@ -1,0 +1,62 @@
+# programs/gpulayer.cyr — the ML-layer-on-GPU crown proof (AGNOS gfx90c).
+#
+# Runs a REAL rupantara MLP up-projection — the bias-free matmul linear_fwd(x, Wfc, 0, fc, M=8, K=8, N=32),
+# the first op of ru_mlp_fwd (src/mlp.cyr:13) — TWICE on the same weights: once via rosnet's production CPU
+# linear_fwd, once via linear_fwd_gpu (src/gpu.cyr), which tiles it into 8x8x8 blocks and dispatches each on
+# the AMD Cezanne gfx90c shader cores through the agnos ring-3 syscall #83. It then byte-compares the two
+# 8x32 = 2048-byte outputs.
+#
+# Bit-identity is expected (not tolerance): #83 computes C=A*B unfused (v_mul_f64 then v_add_f64, k-ascending)
+# and linear_fwd's f64 body is cyrius EMIT_F64V_FMADD = mulpd+addpd (SSE2, ALSO unfused, two roundings, same
+# order); K=8 is a single k-tile (no cross-tile f64 reassociation) and the projection is bias-free. The test
+# data is deterministic FRACTIONAL f64 (products are NOT exactly representable), so a bit-identical result
+# proves the GPU rounds exactly like the CPU on real data — not merely that integer arithmetic happens to agree.
+#
+# ORACLE = the EXIT CODE (no printing — clean on iron, capturable as `run: exit N`):
+#   95 = CROWN: outputs byte-identical AND all 4 tiles executed on the GPU (real up-projection ran on gfx90c).
+#   96 = outputs byte-identical but 0 tiles on GPU  -> plumbing correct, no GPU present (the normal QEMU/host
+#        answer; #83 returns -1 when gpu_matmul_f64_ok was not proven at boot). Gather/scatter is exercised.
+#   97 = byte-identical but a PARTIAL GPU dispatch (some tiles fell back) — unexpected; investigate.
+#   90 = BYTE MISMATCH — the GPU (or the tiling) is wrong. This is the only real failure; the byte diff is the
+#        guard against a silently-wrong gather stride ("completes, stores plausible-but-wrong, no fault").
+
+include "src/lib.cyr"
+
+var lx[64];        # x    : M x K = 8 x 8   f64
+var lw[256];       # Wfc  : K x N = 8 x 32  f64
+var lyc[256];      # y_cpu: M x N = 8 x 32  f64  (rosnet linear_fwd reference)
+var lyg[256];      # y_gpu: M x N = 8 x 32  f64  (linear_fwd_gpu via #83)
+
+fn fill_data(): i64 {
+    var i = 0;
+    while (i < 64) {
+        store64(&lx + i * 8, f64_div(f64_from((i * 3 + 1) % 17 + 1), f64_from(7)));
+        i = i + 1;
+    }
+    var j = 0;
+    while (j < 256) {
+        store64(&lw + j * 8, f64_div(f64_from((j * 5 + 2) % 19 + 1), f64_from(11)));
+        j = j + 1;
+    }
+    return 0;
+}
+
+fn gpulayer_main(): i64 {
+    alloc_init();
+    fill_data();
+
+    linear_fwd(&lx, &lw, 0, &lyc, 8, 8, 32);                       # CPU reference (production path)
+    var gpu_tiles = linear_fwd_gpu(&lx, &lw, 0, &lyg, 8, 8, 32);   # GPU-tiled peer (#83)
+
+    var i = 0;
+    while (i < 256) {
+        if (load64(&lyc + i * 8) != load64(&lyg + i * 8)) { return 90; }   # MISMATCH — the real failure
+        i = i + 1;
+    }
+    if (gpu_tiles == 4) { return 95; }    # CROWN
+    if (gpu_tiles == 0) { return 96; }    # plumbing OK, no GPU (QEMU/host)
+    return 97;                             # partial GPU dispatch (unexpected)
+}
+
+fn _entry(): i64 { var r = gpulayer_main(); syscall(SYS_EXIT, r); return 0; }
+_entry();

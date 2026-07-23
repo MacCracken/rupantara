@@ -26,6 +26,7 @@ modules = [
     "src/act.cyr",
     "src/attn.cyr",
     "src/mlp.cyr",
+    "src/gpu.cyr",
     "src/embed.cyr",
     "src/head.cyr",
     "src/blocks.cyr",
