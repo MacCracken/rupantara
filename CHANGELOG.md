@@ -34,9 +34,11 @@ shader cores.** Additive and OFF by default — `linear_fwd_gpu` is a new peer o
 - **Tiling bit-identical on host** (2026-07-23): `build/gpulayer` exits **96** — `linear_fwd_gpu` (CPU-tiled)
   is byte-for-byte equal to the production `linear_fwd` over the full 8×32 output, proving the gather/scatter
   arithmetic. Both `programs/gpulayer.cyr` and `programs/smoke.cyr` build clean `--agnos`.
-- The GPU `#83` dispatch itself is **iron-only** (QEMU has no AMD GPU → `#83` returns −1). The archaemenid
-  crown burn (`run /bin/gpulayer` → `run: exit 95`) is the remaining confirmation, tracked in agnosticos
-  `iron-nuc-zen-log.md`.
+- **CROWN PROVEN ON IRON** (2026-07-23): `run /bin/gpulayer` → **`exit 95`** on archaemenid (AMD Cezanne) —
+  the outputs were byte-identical AND all 4 tiles dispatched on the GPU, so a real rupantara MLP up-projection
+  matmul executed on the gfx90c shader cores, bit-identical to the CPU `linear_fwd`. This is the AGNOS 1.54.x
+  GPU crown (C6) — the first ML layer's matmul on the shader cores. Tracked in agnosticos
+  `iron-nuc-zen-log.md#tracker-156x-ml-crown`.
 
 ## [0.4.0] — 2026-07-02
 
