@@ -5,7 +5,7 @@ description = "rupantara (रूपान्तर — transformation / metamorp
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/rupantara"
 language = "cyrius"
-cyrius = "6.4.72"
+cyrius = "6.5.27"
 
 # rupantara is a library — no CLI binary. `cyrius build` targets a smoke program
 # that link-checks src/lib.cyr. Consumers pull `dist/rupantara.cyr` via a
@@ -64,5 +64,5 @@ stdlib = [
 # identically for CI and external consumers.
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet.git"
-tag = "0.2.0"
+tag = "1.1.1"
 modules = ["dist/rosnet.cyr"]

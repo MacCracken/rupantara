@@ -6,6 +6,32 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-08-17
+
+### Changed
+
+- **Cyrius pin `6.4.72` -> `6.5.27`** (2026-08-17, ecosystem-wide ML/AI-arc realign ahead of
+  the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib
+  snapshot, clearing the toolchain-drift and `./lib/ shadows version-pinned` warnings.
+  Suite **43/43** across 5 files, identical to the pre-bump baseline; the attn11 parity contract is untouched.
+
+### Fixed
+
+- **`rupantara_version()` had been stale since 0.4.1** — it still returned `400` (0.4.0) after
+  that cut moved `VERSION` and the CHANGELOG but not the constant. `tests/tcyr/smoke.tcyr`
+  asserted the stale value with a message naming 0.4.0, so the gate *confirmed* the drift
+  rather than catching it. Now `402`, with the assertion and its message moved in step and a
+  note in `src/blocks.cyr` requiring both to move on every cut.
+
+### Changed
+
+- **`[deps.rosnet]` `0.2.0` -> `1.1.1`** — the substrate-freeze propagation reaches rupantara.
+  rosnet froze its public surface at **1.0.0** (2026-07-04) and added conv2d/conv1d at 1.1.0, and
+  1.1.1 carries the toolchain realign plus its own tyche bump. rupantara consumes `linear_fwd` and
+  the tensor helpers, all inside the frozen CPU bundle, so this is a tag realign with no behavior
+  change and the attn11 parity contract is untouched. Verified the bump took, not merely built —
+  vendored `lib/rosnet.cyr` moved to `1.1.1`. Suite **48/48**, unchanged.
+
 ## [0.4.1] — 2026-07-23
 
 **AGNOS GPU offload (the 1.54.x GPU crown / C6): rupantara's f64 projection matmul can run on the AMD gfx90c

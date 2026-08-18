@@ -35,9 +35,11 @@ SSM/MoE/MTP paths are not de-duplicated (rupantara has no peer, by design).
 
 ## Toolchain
 
-Cyrius pin **6.3.27** (`cyrius.cyml`). Deps: `math` (f64_exp/F64_PI) + `ganita`
+Cyrius pin **6.5.27** (`cyrius.cyml`). Deps: `math` (f64_exp/F64_PI) + `ganita`
 (f64_tanh); **`rosnet` 0.2.0** (`linear_fwd` matmul + tensor helpers) via
 `[deps.rosnet]`, git+tag (no path override — resolves from the release tag).
+
+**Pin bumped to `6.5.27` 2026-08-17** (ecosystem-wide ML/AI-arc realign, ahead of the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib snapshot; suite re-verified green at the new pin.
 
 ## Build artifacts
 
