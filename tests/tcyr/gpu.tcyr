@@ -1,0 +1,108 @@
+# tests/tcyr/gpu.tcyr — src/gpu.cyr `linear_fwd_gpu`: the 8x8x8 tiling arithmetic
+# against the rosnet CPU peer, plus the SELF-FALLBACK for the shapes the single
+# k-tile cannot take.
+#
+# WHY THIS FILE EXISTS: src/gpu.cyr ships in dist/rupantara.cyr but its only
+# exercise was programs/gpulayer.cyr, which hard-codes M=8/K=8/N=32 and b=0 — the
+# exact shapes the offload accepts. The check shared its restriction with the thing
+# it checked, so the silent K>8 contraction-truncation and the silently dropped bias
+# could never fire; and no CI step builds that program. These cases are shape-driven
+# and run under the `cyrius test` gate.
+#
+# The reference is rosnet `linear_fwd` and the compare is BIT-FOR-BIT (the fill is
+# fractional, so the products are not exactly representable — an integer-only fill
+# would agree by luck rather than by rounding).
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+fn _gfill(p, n, a, m): i64 {
+    var i = 0;
+    while (i < n) {
+        store64(p + i * 8, f64_div(f64_from((i * a + 1) % m + 1), f64_from(7)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# linear_fwd_gpu(shape) must equal linear_fwd(shape) in every bit.
+fn _gcase(M, K, N, bias, name): i64 {
+    var x = t_alloc(M * K);
+    var W = t_alloc(K * N);
+    _gfill(x, M * K, 3, 17);
+    _gfill(W, K * N, 5, 19);
+    var b = 0;
+    if (bias == 1) {
+        b = t_alloc(N);
+        _gfill(b, N, 7, 13);
+    }
+    var yc = t_alloc(M * N);
+    var yg = t_alloc(M * N);
+    linear_fwd(x, W, b, yc, M, K, N);
+    linear_fwd_gpu(x, W, b, yg, M, K, N);
+    var diffs = 0;
+    var i = 0;
+    while (i < M * N) {
+        if (load64(yc + i * 8) != load64(yg + i * 8)) { diffs = diffs + 1; }
+        i = i + 1;
+    }
+    assert_eq(diffs, 0, name);
+    return 0;
+}
+
+fn _gtiles(M, K, N, bias): i64 {
+    var x = t_alloc(M * K);
+    var W = t_alloc(K * N);
+    _gfill(x, M * K, 3, 17);
+    _gfill(W, K * N, 5, 19);
+    var b = 0;
+    if (bias == 1) {
+        b = t_alloc(N);
+        _gfill(b, N, 7, 13);
+    }
+    var y = t_alloc(M * N);
+    return linear_fwd_gpu(x, W, b, y, M, K, N);
+}
+
+# Shapes the offload ACCEPTS (bias-free, K <= 8): the gather/scatter must be exact,
+# including the ragged clip when M or N is not a multiple of 8.
+fn test_gpu_tiling(): i64 {
+    _gcase(8, 8, 32, 0, "gpu tiling == linear_fwd (M=8,K=8,N=32 — the gpulayer shape)");
+    _gcase(5, 3, 7, 0, "gpu tiling == linear_fwd (ragged M and N, K<8)");
+    _gcase(17, 8, 20, 0, "gpu tiling == linear_fwd (multi-tile M and N)");
+    _gcase(1, 8, 1, 0, "gpu tiling == linear_fwd (1x1 degenerate)");
+    return 0;
+}
+
+# THE REGRESSION. Before the 6.6.2 audit fix the tile gather capped `kk < 8` with no
+# k-tile loop, so K>8 silently dropped elements k=8..K-1 from the contraction, and `b`
+# was ignored outright (the fallback leg passes an all-zero bias, the GPU leg adds
+# none), so a bias vanished on every target. Both must now self-fall-back to the CPU
+# peer and return the FULL answer.
+fn test_gpu_self_fallback(): i64 {
+    _gcase(8, 16, 8, 0, "K>8 self-falls-back (contraction not truncated at k=8)");
+    _gcase(4, 40, 12, 0, "K>>8 self-falls-back");
+    _gcase(8, 8, 8, 1, "non-zero bias self-falls-back (bias not dropped)");
+    _gcase(6, 24, 10, 1, "bias + K>8 self-falls-back");
+    return 0;
+}
+
+# The tile count is the caller's dispatch oracle (gpulayer.cyr reads it): off AGNOS
+# every accepted shape reports 0, and a self-fallback shape must report 0 too — never
+# a partial dispatch that would read as "some of this ran on the GPU".
+fn test_gpu_tile_count(): i64 {
+    assert_eq(_gtiles(8, 8, 8, 0), 0, "accepted shape off-GPU reports 0 tiles");
+    assert_eq(_gtiles(8, 64, 4, 0), 0, "K>8 self-fallback reports 0 tiles");
+    assert_eq(_gtiles(8, 8, 8, 1), 0, "bias self-fallback reports 0 tiles");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_gpu_tiling();
+    test_gpu_self_fallback();
+    test_gpu_tile_count();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(60, rc);

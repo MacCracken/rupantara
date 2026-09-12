@@ -6,6 +6,14 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.5.27` → `6.6.2`.** No source change; the value form needed none.
+  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.
+
+
 ## [0.4.2] — 2026-08-17
 
 ### Changed
