@@ -117,8 +117,8 @@ fn ru_block_fwd(cfg, pblk, xin, xout, a, attn_out, b, mlp_out, fc, gg, m1, r1, m
     # x' = xin + Attn(LN1(xin))
     ru_ln_fwd(xin, pblk + _ru_o_ln1g(cfg) * 8, pblk + _ru_o_ln1b(cfg) * 8, a, m1, r1, T, C);
     ru_attn_fwd(pblk + _ru_o_Wq(cfg) * 8, _bq(cfg, pblk), pblk + _ru_o_Wk(cfg) * 8, _bk(cfg, pblk),
-    pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
-    a, attn_out, arena, T, C, nh, nkv, 0);
+      pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
+      a, attn_out, arena, T, C, nh, nkv, 0);
     var i = 0;
     while (i < TC) {
         store64(xout + i * 8, f64_add(load64(xin + i * 8), load64(attn_out + i * 8)));
@@ -127,7 +127,7 @@ fn ru_block_fwd(cfg, pblk, xin, xout, a, attn_out, b, mlp_out, fc, gg, m1, r1, m
     # x'' = x' + MLP(LN2(x'))
     ru_ln_fwd(xout, pblk + _ru_o_ln2g(cfg) * 8, pblk + _ru_o_ln2b(cfg) * 8, b, m2, r2, T, C);
     ru_mlp_fwd(b, pblk + _ru_o_Wfc(cfg) * 8, pblk + _ru_o_bfc(cfg) * 8, pblk + _ru_o_Wproj(cfg) * 8,
-    pblk + _ru_o_bproj(cfg) * 8, fc, gg, mlp_out, T, C, F);
+      pblk + _ru_o_bproj(cfg) * 8, fc, gg, mlp_out, T, C, F);
     i = 0;
     while (i < TC) {
         store64(xout + i * 8, f64_add(load64(xout + i * 8), load64(mlp_out + i * 8)));

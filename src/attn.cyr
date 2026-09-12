@@ -79,7 +79,7 @@ fn ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
                     d = d + 4;
                 }
                 var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
-                f64_add(load64(&acc + 16), load64(&acc + 24)));
+                  f64_add(load64(&acc + 16), load64(&acc + 24)));
                 while (d < hd) {
                     dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
                     d = d + 1;
@@ -124,7 +124,7 @@ fn ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
                 }
                 while (d < hd) {
                     store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
-                    f64_mul(pij, load64(vbase + d * 8))));
+                        f64_mul(pij, load64(vbase + d * 8))));
                     d = d + 1;
                 }
                 j = j + 1;

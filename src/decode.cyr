@@ -42,7 +42,7 @@ fn ru_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv): i64 {
                 d = d + 4;
             }
             var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
-            f64_add(load64(&acc + 16), load64(&acc + 24)));
+              f64_add(load64(&acc + 16), load64(&acc + 24)));
             while (d < hd) {
                 dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
                 d = d + 1;
@@ -84,7 +84,7 @@ fn ru_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv): i64 {
             }
             while (d < hd) {
                 store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
-                f64_mul(pij, load64(vbase + d * 8))));
+                    f64_mul(pij, load64(vbase + d * 8))));
                 d = d + 1;
             }
             j = j + 1;
@@ -98,7 +98,7 @@ fn ru_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv): i64 {
 # x_row(1,C) -> out_row(1,C), appending this position's K/V to Kc/Vc ((T,Ckv),
 # must already hold 0..pos-1). Uses rosnet linear_fwd (M=1); learned-pos only.
 fn ru_attn_fwd_row(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x_row, out_row,
-Kc, Vc, prow, concat_row, q_row, pos, C, nh, nkv): i64 {
+  Kc, Vc, prow, concat_row, q_row, pos, C, nh, nkv): i64 {
     var Ckv = nkv * (C / nh);
     linear_fwd(x_row, Wq, bq, q_row, 1, C, C);
     linear_fwd(x_row, Wk, bk, Kc + pos * Ckv * 8, 1, C, Ckv);
@@ -159,14 +159,14 @@ fn ru_model_fwd_row(cfg, params, tok, pos, kv, logits): i64 {
         # x' = rx + Attn(LN1(rx))
         ru_ln_fwd(rx, pblk + _ru_o_ln1g(cfg) * 8, pblk + _ru_o_ln1b(cfg) * 8, ra, rm, rr, 1, C);
         ru_attn_fwd_row(pblk + _ru_o_Wq(cfg) * 8, _bq(cfg, pblk), pblk + _ru_o_Wk(cfg) * 8, _bk(cfg, pblk),
-        pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
-        ra, rattn, _ru_kv_k(kv, cfg, L), _ru_kv_v(kv, cfg, L), rprow, rconcat, rq, pos, C, nh, nkv);
+          pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
+          ra, rattn, _ru_kv_k(kv, cfg, L), _ru_kv_v(kv, cfg, L), rprow, rconcat, rq, pos, C, nh, nkv);
         c = 0;
         while (c < C) { store64(rx + c * 8, f64_add(load64(rx + c * 8), load64(rattn + c * 8))); c = c + 1; }
         # x'' = rx + MLP(LN2(rx))
         ru_ln_fwd(rx, pblk + _ru_o_ln2g(cfg) * 8, pblk + _ru_o_ln2b(cfg) * 8, rb, rm2, rr2, 1, C);
         ru_mlp_fwd(rb, pblk + _ru_o_Wfc(cfg) * 8, pblk + _ru_o_bfc(cfg) * 8, pblk + _ru_o_Wproj(cfg) * 8,
-        pblk + _ru_o_bproj(cfg) * 8, rfc, rgg, rmlp, 1, C, F);
+          pblk + _ru_o_bproj(cfg) * 8, rfc, rgg, rmlp, 1, C, F);
         c = 0;
         while (c < C) { store64(rx + c * 8, f64_add(load64(rx + c * 8), load64(rmlp + c * 8))); c = c + 1; }
         L = L + 1;

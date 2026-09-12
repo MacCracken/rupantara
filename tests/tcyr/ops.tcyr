@@ -36,8 +36,8 @@ fn test_ln_fwd() {
     var s = f64_add(f64_add(load64(y + 0), load64(y + 8)), load64(y + 16));
     assert(f64_close(s, f64_from(0), tol_1e6()), "ln row-sum ~ 0");
     var ss = f64_add(f64_add(f64_mul(load64(y + 0), load64(y + 0)),
-    f64_mul(load64(y + 8), load64(y + 8))),
-    f64_mul(load64(y + 16), load64(y + 16)));
+        f64_mul(load64(y + 8), load64(y + 8))),
+      f64_mul(load64(y + 16), load64(y + 16)));
     assert(f64_close(ss, f64_from(3), tol_1e3()), "ln sum-of-squares ~ C (unit var)");
     return 0;
 }

@@ -21,7 +21,7 @@ fn ru_head_fwd_row(f_row, tok_emb, logits_row, C, V): i64 {
             c = c + 4;
         }
         var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
-        f64_add(load64(&acc + 16), load64(&acc + 24)));
+          f64_add(load64(&acc + 16), load64(&acc + 24)));
         while (c < C) {
             dot = f64_add(dot, f64_mul(load64(f_row + c * 8), load64(erow + c * 8)));
             c = c + 1;
