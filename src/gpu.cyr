@@ -27,7 +27,25 @@ var lfg_b[64];
 var lfg_c[64];
 var lfg_zbias[8];
 
+# Full CPU delegation for shapes the 8x8 tile path cannot represent (K > 8, or a
+# non-zero bias). Returns 0 = "no tile ran on the GPU", this file's existing contract.
+fn linear_fwd_gpu_cpu_peer(x, W, b, y, M, K, N): i64 {
+    linear_fwd(x, W, b, y, M, K, N);
+    return 0;
+}
+
 fn linear_fwd_gpu(x, W, b, y, M, K, N): i64 {
+    # SELF-FALLBACK. The tile path below gathers a FIXED 8x8 block (`kk < 8`, `kr < 8`)
+    # with no k-tile loop, and substitutes `lfg_zbias` for `b`. So it can only represent
+    # K <= 8 with no bias. Handed anything else it used to compute a WRONG answer
+    # silently: K>8 dropped elements k=8..K-1 from the contraction, and a non-zero `b`
+    # vanished entirely on every target. Both shapes now delegate the whole problem to
+    # the CPU peer and report 0 GPU tiles — which is already this function's documented
+    # meaning for "full CPU fallback". Pinned by test_gpu_self_fallback in
+    # tests/tcyr/gpu.tcyr, which compares against linear_fwd element by element.
+    if (K > 8) { return linear_fwd_gpu_cpu_peer(x, W, b, y, M, K, N); }
+    if (b != 0) { return linear_fwd_gpu_cpu_peer(x, W, b, y, M, K, N); }
+
     # zero-bias vector for the CPU-fallback linear_fwd (this path is bias-free by contract; b is ignored).
     var z = 0;
     while (z < 8) { store64(&lfg_zbias + z * 8, f64_from(0)); z = z + 1; }
