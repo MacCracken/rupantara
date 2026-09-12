@@ -160,7 +160,7 @@ fn ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
                     d = d + 4;
                 }
                 var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
-                f64_add(load64(&acc + 16), load64(&acc + 24)));
+                  f64_add(load64(&acc + 16), load64(&acc + 24)));
                 while (d < hd) {
                     dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
                     d = d + 1;
@@ -205,7 +205,7 @@ fn ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
                 }
                 while (d < hd) {
                     store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
-                    f64_mul(pij, load64(vbase + d * 8))));
+                        f64_mul(pij, load64(vbase + d * 8))));
                     d = d + 1;
                 }
                 j = j + 1;
@@ -289,7 +289,25 @@ var lfg_b[64];
 var lfg_c[64];
 var lfg_zbias[8];
 
+# Full CPU delegation for shapes the 8x8 tile path cannot represent (K > 8, or a
+# non-zero bias). Returns 0 = "no tile ran on the GPU", this file's existing contract.
+fn linear_fwd_gpu_cpu_peer(x, W, b, y, M, K, N): i64 {
+    linear_fwd(x, W, b, y, M, K, N);
+    return 0;
+}
+
 fn linear_fwd_gpu(x, W, b, y, M, K, N): i64 {
+    # SELF-FALLBACK. The tile path below gathers a FIXED 8x8 block (`kk < 8`, `kr < 8`)
+    # with no k-tile loop, and substitutes `lfg_zbias` for `b`. So it can only represent
+    # K <= 8 with no bias. Handed anything else it used to compute a WRONG answer
+    # silently: K>8 dropped elements k=8..K-1 from the contraction, and a non-zero `b`
+    # vanished entirely on every target. Both shapes now delegate the whole problem to
+    # the CPU peer and report 0 GPU tiles — which is already this function's documented
+    # meaning for "full CPU fallback". Pinned by test_gpu_self_fallback in
+    # tests/tcyr/gpu.tcyr, which compares against linear_fwd element by element.
+    if (K > 8) { return linear_fwd_gpu_cpu_peer(x, W, b, y, M, K, N); }
+    if (b != 0) { return linear_fwd_gpu_cpu_peer(x, W, b, y, M, K, N); }
+
     # zero-bias vector for the CPU-fallback linear_fwd (this path is bias-free by contract; b is ignored).
     var z = 0;
     while (z < 8) { store64(&lfg_zbias + z * 8, f64_from(0)); z = z + 1; }
@@ -406,7 +424,7 @@ fn ru_head_fwd_row(f_row, tok_emb, logits_row, C, V): i64 {
             c = c + 4;
         }
         var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
-        f64_add(load64(&acc + 16), load64(&acc + 24)));
+          f64_add(load64(&acc + 16), load64(&acc + 24)));
         while (c < C) {
             dot = f64_add(dot, f64_mul(load64(f_row + c * 8), load64(erow + c * 8)));
             c = c + 1;
@@ -585,8 +603,8 @@ fn ru_block_fwd(cfg, pblk, xin, xout, a, attn_out, b, mlp_out, fc, gg, m1, r1, m
     # x' = xin + Attn(LN1(xin))
     ru_ln_fwd(xin, pblk + _ru_o_ln1g(cfg) * 8, pblk + _ru_o_ln1b(cfg) * 8, a, m1, r1, T, C);
     ru_attn_fwd(pblk + _ru_o_Wq(cfg) * 8, _bq(cfg, pblk), pblk + _ru_o_Wk(cfg) * 8, _bk(cfg, pblk),
-    pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
-    a, attn_out, arena, T, C, nh, nkv, 0);
+      pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
+      a, attn_out, arena, T, C, nh, nkv, 0);
     var i = 0;
     while (i < TC) {
         store64(xout + i * 8, f64_add(load64(xin + i * 8), load64(attn_out + i * 8)));
@@ -595,7 +613,7 @@ fn ru_block_fwd(cfg, pblk, xin, xout, a, attn_out, b, mlp_out, fc, gg, m1, r1, m
     # x'' = x' + MLP(LN2(x'))
     ru_ln_fwd(xout, pblk + _ru_o_ln2g(cfg) * 8, pblk + _ru_o_ln2b(cfg) * 8, b, m2, r2, T, C);
     ru_mlp_fwd(b, pblk + _ru_o_Wfc(cfg) * 8, pblk + _ru_o_bfc(cfg) * 8, pblk + _ru_o_Wproj(cfg) * 8,
-    pblk + _ru_o_bproj(cfg) * 8, fc, gg, mlp_out, T, C, F);
+      pblk + _ru_o_bproj(cfg) * 8, fc, gg, mlp_out, T, C, F);
     i = 0;
     while (i < TC) {
         store64(xout + i * 8, f64_add(load64(xout + i * 8), load64(mlp_out + i * 8)));
@@ -694,7 +712,7 @@ fn ru_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv): i64 {
                 d = d + 4;
             }
             var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
-            f64_add(load64(&acc + 16), load64(&acc + 24)));
+              f64_add(load64(&acc + 16), load64(&acc + 24)));
             while (d < hd) {
                 dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
                 d = d + 1;
@@ -736,7 +754,7 @@ fn ru_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv): i64 {
             }
             while (d < hd) {
                 store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
-                f64_mul(pij, load64(vbase + d * 8))));
+                    f64_mul(pij, load64(vbase + d * 8))));
                 d = d + 1;
             }
             j = j + 1;
@@ -750,7 +768,7 @@ fn ru_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv): i64 {
 # x_row(1,C) -> out_row(1,C), appending this position's K/V to Kc/Vc ((T,Ckv),
 # must already hold 0..pos-1). Uses rosnet linear_fwd (M=1); learned-pos only.
 fn ru_attn_fwd_row(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x_row, out_row,
-Kc, Vc, prow, concat_row, q_row, pos, C, nh, nkv): i64 {
+  Kc, Vc, prow, concat_row, q_row, pos, C, nh, nkv): i64 {
     var Ckv = nkv * (C / nh);
     linear_fwd(x_row, Wq, bq, q_row, 1, C, C);
     linear_fwd(x_row, Wk, bk, Kc + pos * Ckv * 8, 1, C, Ckv);
@@ -811,14 +829,14 @@ fn ru_model_fwd_row(cfg, params, tok, pos, kv, logits): i64 {
         # x' = rx + Attn(LN1(rx))
         ru_ln_fwd(rx, pblk + _ru_o_ln1g(cfg) * 8, pblk + _ru_o_ln1b(cfg) * 8, ra, rm, rr, 1, C);
         ru_attn_fwd_row(pblk + _ru_o_Wq(cfg) * 8, _bq(cfg, pblk), pblk + _ru_o_Wk(cfg) * 8, _bk(cfg, pblk),
-        pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
-        ra, rattn, _ru_kv_k(kv, cfg, L), _ru_kv_v(kv, cfg, L), rprow, rconcat, rq, pos, C, nh, nkv);
+          pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
+          ra, rattn, _ru_kv_k(kv, cfg, L), _ru_kv_v(kv, cfg, L), rprow, rconcat, rq, pos, C, nh, nkv);
         c = 0;
         while (c < C) { store64(rx + c * 8, f64_add(load64(rx + c * 8), load64(rattn + c * 8))); c = c + 1; }
         # x'' = rx + MLP(LN2(rx))
         ru_ln_fwd(rx, pblk + _ru_o_ln2g(cfg) * 8, pblk + _ru_o_ln2b(cfg) * 8, rb, rm2, rr2, 1, C);
         ru_mlp_fwd(rb, pblk + _ru_o_Wfc(cfg) * 8, pblk + _ru_o_bfc(cfg) * 8, pblk + _ru_o_Wproj(cfg) * 8,
-        pblk + _ru_o_bproj(cfg) * 8, rfc, rgg, rmlp, 1, C, F);
+          pblk + _ru_o_bproj(cfg) * 8, rfc, rgg, rmlp, 1, C, F);
         c = 0;
         while (c < C) { store64(rx + c * 8, f64_add(load64(rx + c * 8), load64(rmlp + c * 8))); c = c + 1; }
         L = L + 1;
