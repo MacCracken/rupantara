@@ -49,4 +49,29 @@ aarch64; see the audit).
   call would need a gather copy per call, and no ordering-preserving packing
   was found.
 - **The whole forward**: dominated by rosnet `linear_fwd` (rosnet 1.2.2 made it
-  2.2–2.7× faster), then GELU and attention.
+  2.2–2.7× faster, and 1.4.1 adds an AVX2 path), then GELU and attention.
+
+## 0.5.2 → 0.5.3 (rosnet 1.2.2 → 1.4.1, 2026-11-09, Ryzen 7 5800H)
+
+rosnet 1.4.1 runs `linear_fwd` 4 lanes wide on an AVX2 CPU. Measured in one
+process, alternating the AVX2 path with rosnet's forced-SSE2 switch
+(`_rosnet_force_sse2`, test-only), median of 5:
+
+| Shape | AVX2 / SSE2 |
+|---|---:|
+| `linear_fwd` at the bench model's projections (M = 64 or 1; C = 256, F = 1024) | 0.858 – 0.997 |
+| `linear_fwd` at GPT-2 widths (M = 64 or 1; C = 768, F = 3072) | 0.893 – 0.960 |
+| `ru_model_fwd_s`, bench model (V=1024 C=256 T=64 NL=2) | 0.955 |
+| `ru_model_fwd_row_s`, bench model | 0.976 |
+| `ru_model_fwd_s`, GPT-2 widths (V=1024 C=768 T=64 NL=2) | 1.000 |
+| `ru_model_fwd_row_s`, GPT-2 widths | 1.008 |
+
+- **Every matmul is faster**, by 0.3–14%.
+- **End to end, the bench model gains 2.4–4.5%, and GPT-2 widths are even**
+  (within ±1%). rosnet 1.4.1 reports the same effect: on this power-limited
+  CPU, 256-bit work slows the code that runs after it, here GELU and
+  attention.
+- **Use the in-process A/B, not the history rows.** The `bench-history.csv`
+  rows for this bump, two `scripts/bench-history.sh` sessions taken minutes
+  apart, read the model rows 4–7% *slower*. The A/B above shows that is drift
+  between sessions, not the bump. Every output is bit-identical on both paths.

@@ -8,8 +8,9 @@
 #   - the #83 shader computes C = A*B with UNFUSED v_mul_f64 then v_add_f64, k-ascending (kernel-fidelity
 #     proven: gpu_shader_dispatch_f64_fidelity, which diverges from a fused FMA on rounding data);
 #   - rosnet linear_fwd's f64 body is one packed f64v_axpy per row step (1.2.2+; f64v_fmadd before), which on
-#     x86 is mulpd + addpd (SSE2 has NO hardware FMA) — ALSO unfused, two roundings, k-ascending (rosnet ADR
-#     0002 holds every kernel optimization to the same rounding sequence);
+#     x86 is mulpd + addpd (SSE2 has NO hardware FMA); on an AVX2 CPU (1.4.1+) it is one f64v256_fmadd per
+#     128-lane chunk, which lowers to vmulpd + vaddpd. ALSO unfused either way, two roundings, k-ascending
+#     (rosnet ADR 0002 holds every kernel optimization to the same rounding sequence);
 #   - so per element both compute round(round(x_k*W_kj) + acc) in the same order => same bits.
 #   K<=8 means a SINGLE k-tile, so there is no cross-tile f64 accumulation to reorder. Bias MUST be 0:
 #   linear_fwd seeds y with the bias as the FIRST addend, so adding a bias after the GPU sum would change the

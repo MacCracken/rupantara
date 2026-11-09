@@ -6,8 +6,46 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-11-09
+
+A dependency realign onto the latest rosnet. There is no API change, and every
+output is bit-identical to 0.5.2.
+
 ### Changed
 
+- **`[deps.rosnet]` `1.2.2` → `1.4.1`**, the latest rosnet. rosnet's tyche
+  dependency stays at 1.2.2.
+  - **1.3.0 and 1.4.0** change only rosnet's GPU profile. rupantara uses the
+    CPU bundle.
+  - **1.4.1** runs `linear_fwd` 4 lanes wide on an AVX2 CPU: one
+    `f64v256_fmadd` per 128-lane chunk, which lowers to `vmulpd` + `vaddpd`
+    (unfused), so each element rounds as SSE2's `mulpd` + `addpd` did. The path
+    is picked per call by a cached CPUID probe and is never taken on aarch64.
+- **Checked independently here, not taken on rosnet's word.** On this host
+  (Ryzen 7 5800H), `_rosnet_avx2()` is 1, so the AVX2 path ran. On aarch64 it
+  is 0.
+  - The 6,742-value raw-bits golden dump is byte-identical to 0.5.1/0.5.2 on
+    x86_64 (the AVX2 path) and on aarch64 under qemu.
+  - All 164 assertions pass on both targets, and the fuzz harness passes
+    (20,000 rounds).
+  - Under cyrius 6.6.2, attn11's and anukūlana's pin, every suite passes.
+  - The attn11 parity contract is untouched.
+- **A new stdlib leaf comes in through rosnet.** rosnet's CPU sidecar now lists
+  `simd`, and its bundle starts with `include "lib/simd.cyr"`. A fresh
+  `cyrius deps` (CI's path, from an empty `lib/`) vendors it automatically, so
+  rupantara's manifest needs no change: 30 locked files, `deps --verify` clean.
+  `dist/rupantara.deps` is unchanged (`math`, `ganita`). No function name in
+  rosnet 1.4.1 or `lib/simd.cyr` collides with rupantara's.
+- **Speed.** Every `linear_fwd` shape rupantara runs is 0.3–14% faster on the
+  AVX2 path. End to end the gain mostly washes out, as rosnet 1.4.1 reports for
+  this power-limited CPU: the bench model's forward and decode step are
+  2.4–4.5% faster, and GPT-2 widths are even (within ±1%). These are in-process
+  A/B numbers (`docs/benchmarks.md`). Two `bench-history.sh` sessions minutes
+  apart showed the model rows 4–7% slower; the A/B shows that is session drift.
+- The DCE smoke binary grows from 33,488 to 38,784 B: the `simd` leaf and the
+  AVX2 path.
+- `cyrius.cyml`'s rosnet comment, `src/gpu.cyr`'s bit-identity note (it now
+  names the AVX2 body), `state.md` and `docs/benchmarks.md` are updated.
 - **`docs/development/roadmap.md` reorganized.** Completed milestones are
   removed: M0–M2, and M4 and M5, which the 0.5.2 sweep covered. The remaining
   work is planned as 0.6.x (consumers on real models), 0.7.x (the API shape the

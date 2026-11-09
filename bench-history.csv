@@ -21,3 +21,27 @@ date,version,benchmark,time_ns
 2026-11-09T20:55:47Z,0.5.2,"ru_model_fwd_row pos=63 (same model, one decode step)",1037000
 2026-11-09T20:55:47Z,0.5.2,"ru_model_fwd_s (same model, caller scratch)",61525000
 2026-11-09T20:55:47Z,0.5.2,"ru_model_fwd_row_s pos=63 (same model, caller scratch)",1081000
+2026-11-09T21:47:02Z,0.5.2,"ru_attn_core_fwd T=128 C=768 nh=12",11831000
+2026-11-09T21:47:02Z,0.5.2,"ru_attn_core_fwd T=128 C=768 nh=12 nkv=4",12169000
+2026-11-09T21:47:02Z,0.5.2,"ru_attn_core_fwd_row pos=511 C=768 nh=12",742332
+2026-11-09T21:47:02Z,0.5.2,"ru_head_fwd_row C=768 V=12564 (1/4 LM head row)",8492000
+2026-11-09T21:47:02Z,0.5.2,"ru_ln_fwd 64x768",538744
+2026-11-09T21:47:02Z,0.5.2,"ru_gelu_fwd n=64x3072",17708000
+2026-11-09T21:47:02Z,0.5.2,"ru_softmax_fwd 1x50257",1124000
+2026-11-09T21:47:02Z,0.5.2,"ru_embed_fwd 64x768",19388
+2026-11-09T21:47:02Z,0.5.2,"ru_model_fwd V=1024 C=256 T=64 nh=4 NL=2 F=1024",61342000
+2026-11-09T21:47:02Z,0.5.2,"ru_model_fwd_row pos=63 (same model, one decode step)",966743
+2026-11-09T21:47:02Z,0.5.2,"ru_model_fwd_s (same model, caller scratch)",58885000
+2026-11-09T21:47:02Z,0.5.2,"ru_model_fwd_row_s pos=63 (same model, caller scratch)",1014000
+2026-11-09T21:49:43Z,0.5.3,"ru_attn_core_fwd T=128 C=768 nh=12",11973000
+2026-11-09T21:49:43Z,0.5.3,"ru_attn_core_fwd T=128 C=768 nh=12 nkv=4",12261000
+2026-11-09T21:49:43Z,0.5.3,"ru_attn_core_fwd_row pos=511 C=768 nh=12",767689
+2026-11-09T21:49:43Z,0.5.3,"ru_head_fwd_row C=768 V=12564 (1/4 LM head row)",8300000
+2026-11-09T21:49:43Z,0.5.3,"ru_ln_fwd 64x768",542045
+2026-11-09T21:49:43Z,0.5.3,"ru_gelu_fwd n=64x3072",17840000
+2026-11-09T21:49:43Z,0.5.3,"ru_softmax_fwd 1x50257",1139000
+2026-11-09T21:49:43Z,0.5.3,"ru_embed_fwd 64x768",20318
+2026-11-09T21:49:43Z,0.5.3,"ru_model_fwd V=1024 C=256 T=64 nh=4 NL=2 F=1024",63816000
+2026-11-09T21:49:43Z,0.5.3,"ru_model_fwd_row pos=63 (same model, one decode step)",1034000
+2026-11-09T21:49:43Z,0.5.3,"ru_model_fwd_s (same model, caller scratch)",63107000
+2026-11-09T21:49:43Z,0.5.3,"ru_model_fwd_row_s pos=63 (same model, caller scratch)",1057000

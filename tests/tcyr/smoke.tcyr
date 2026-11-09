@@ -5,7 +5,7 @@ include "lib/assert.cyr"
 
 # rupantara_version() packs VERSION as major*10000 + minor*100 + patch
 fn test_version() {
-    assert_eq(rupantara_version(), 502, "version 0.5.2 packs to 502");
+    assert_eq(rupantara_version(), 503, "version 0.5.3 packs to 503");
     return 0;
 }
 

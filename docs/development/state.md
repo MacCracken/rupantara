@@ -1,12 +1,13 @@
 # rupantara — Current State
 
-> **Last refresh**: 2026-11-09 (0.5.2) | **Cadence**: every release.
+> **Last refresh**: 2026-11-09 (0.5.3) | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
 
-**0.5.2 (2026-11-09): the P(-1) hardening, optimization and repair sweep**
-([`docs/audit/2026-11-09-audit.md`](../audit/2026-11-09-audit.md)).
+**0.5.3 (2026-11-09):** rosnet 1.2.2 → 1.4.1, the latest release. The bits are
+unchanged. It is built on **0.5.2**, the P(-1) hardening, optimization and
+repair sweep ([`docs/audit/2026-11-09-audit.md`](../audit/2026-11-09-audit.md)).
 
 **The forward** is the GPT-2-shaped forward ported verbatim from attn11:
 
@@ -61,8 +62,11 @@ clean, and execution coverage is 22/22 public functions.
 Cyrius pin **6.7.18** (`cyrius.cyml`). Dependencies:
 
 - `math` (`f64_exp`, `F64_PI`) and `ganita` (`f64_tanh`), both stdlib;
-- **`rosnet` 1.2.2** (`linear_fwd` and the tensor helpers) via
-  `[deps.rosnet]`, git + tag. rosnet pulls in `tyche` 1.2.2 transitively.
+- **`rosnet` 1.4.1** (`linear_fwd` and the tensor helpers) via
+  `[deps.rosnet]`, git + tag. rosnet pulls in `tyche` 1.2.2 transitively, and
+  the stdlib `simd` leaf through its own sidecar.
+- On an AVX2 CPU, `linear_fwd` takes rosnet 1.4.1's 256-bit path (`vmulpd` +
+  `vaddpd`, unfused). rupantara's golden dump is byte-identical on it.
 
 **Bits across pins** (measured 2026-11-09):
 
@@ -78,7 +82,7 @@ Cyrius pin **6.7.18** (`cyrius.cyml`). Dependencies:
 
 ## Build artifacts
 
-- `programs/smoke.cyr` → `build/rupantara_smoke` (link-check; 33,488 B with DCE).
+- `programs/smoke.cyr` → `build/rupantara_smoke` (link-check; 38,784 B with DCE: rosnet 1.4.1's `simd` leaf and AVX2 path).
 - `dist/rupantara.cyr`: the distlib bundle for consumers (`[deps.rupantara]`).
   The sidecar is `math` and `ganita`. It compiles under cyrius 6.6.2.
 - `tests/rupantara.fcyr` (fuzz) and `tests/rupantara.bcyr` (bench).
