@@ -6,6 +6,25 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+### Changed
+
+- **`docs/development/roadmap.md` reorganized.** Completed milestones are
+  removed: M0–M2, and M4 and M5, which the 0.5.2 sweep covered. The remaining
+  work is planned as 0.6.x (consumers on real models), 0.7.x (the API shape the
+  freeze will lock), 0.8.x (the freeze candidate) and the 1.0.0 cut.
+  Architecture breadth (RoPE, RMSNorm, SwiGLU), the GPU and
+  bit-contract-limited performance items, and ecosystem items move to a
+  post-1.0, demand-gated backlog.
+- New items found while planning:
+  - a committed golden-dump gate;
+  - a memory-lean batch forward. `ru_model_fwd`'s scratch reaches 6.84 GiB at
+    GPT-2-small widths and T = 8192, past the 2 GiB allocation cap, and 6 GiB
+    of it is attention probabilities the forward never re-reads;
+  - pre-freeze decisions on how the config descriptor grows and where the GPU
+    path lives.
+- `state.md`, `CLAUDE.md` and the `src/gpu.cyr` comment point at the new
+  sections.
+
 ## [0.5.2] - 2026-11-09
 
 The P(-1) hardening, optimization and repair sweep, recorded in

@@ -14,7 +14,7 @@
 #   K<=8 means a SINGLE k-tile, so there is no cross-tile f64 accumulation to reorder. Bias MUST be 0:
 #   linear_fwd seeds y with the bias as the FIRST addend, so adding a bias after the GPU sum would change the
 #   association. K>8 or a bias hands the whole problem to the CPU peer (bit-exact by construction); a GPU
-#   path for them needs cross-tile accumulation in linear_fwd's order (docs/development/roadmap.md, Follow-ons).
+#   path for them needs cross-tile accumulation in linear_fwd's order (docs/development/roadmap.md, Backlog).
 #
 # PORTABILITY / SAFETY: the #83 dispatch is compiled ONLY under CYRIUS_TARGET_AGNOS. On any other target, or
 # when #83 returns < 0 (no GPU, or the boot self-test left gpu_matmul_f64_ok unproven — the normal QEMU

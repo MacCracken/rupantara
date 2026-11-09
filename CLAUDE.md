@@ -48,5 +48,5 @@ make dist    # cyrius distlib -> dist/rupantara.cyr
 
 Definition of done each bite: `make test` and `make fuzz` green · `make fmt-check`
 clean · `make lint` no `warn ` · `make doc` clean · `make dist` regenerated. See `docs/development/roadmap.md` for
-the march to v1.0 (M1 = the attn11 forward extraction — a cross-repo change that
-needs its own explicit go for the attn11 re-point).
+the 0.6 → 1.0 plan and the post-1.0 backlog. Cross-repo items (attn11, anukūlana)
+each need the maintainer's explicit go.

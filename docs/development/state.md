@@ -96,11 +96,16 @@ Cyrius pin **6.7.18** (`cyrius.cyml`). Dependencies:
 
 ## Next
 
-- **M1** (the forward, the attn11 re-fold, parity) and **M2** (KV-cache decode)
-  are done.
-- **M4** is mostly done in 0.5.2: config validation, fuzz and benchmarks. Still
-  open: tokens/s numbers at GPT-2 scale.
-- **M5** (the security audit) is covered for memory safety, integer overflow,
-  shape bounds and fail-loud by the 0.5.2 audit, and `SECURITY.md` exists.
-- Next up: **M3**, architecture breadth (RoPE, RMSNorm, SwiGLU), demand-gated,
-  or support for **anukūlana**'s importer. See `roadmap.md`.
+[`roadmap.md`](roadmap.md) plans 0.6 → 1.0. Next up is **0.6.x, consumers on
+real models**:
+
+- a committed golden-dump gate;
+- the variable-length forward (`ru_model_fwd_n`), so anukūlana stops repacking
+  its weights per run length;
+- a memory-lean batch forward (no `nh·T·T` probability scratch);
+- GPT-2-scale tokens/s;
+- the anukūlana and attn11 moves onto a current rupantara (cross-repo).
+
+0.7.x fixes the API shape before the freeze, 0.8.x is the freeze candidate,
+and architecture breadth (RoPE, RMSNorm, SwiGLU) is post-1.0 backlog,
+demand-gated.
