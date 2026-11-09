@@ -12,8 +12,11 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+'
       - '[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+'
 
+# Read-only by default. Only the job that publishes the release gets contents: write,
+# so the CI gate it calls and the build job never hold a write token (0.5.2; the whole
+# workflow held contents: write before).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   ci:
@@ -25,7 +28,11 @@ jobs:
     needs: [ci]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # SHA-pinned, as in ci.yml; persist-credentials: false keeps the token away from
+      # the curl | sh installer below.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Verify version
         run: |
@@ -61,7 +68,10 @@ jobs:
           for f in tests/tcyr/*.tcyr; do cyrius test "$f" || exit 1; done
 
       - name: Regenerate dist bundle
-        run: cyrius distlib
+        # The shipped bundle must be the committed one (the CI gate checks the same).
+        run: |
+          cyrius distlib
+          git diff --exit-code dist/ || { echo "dist/ differs from the tagged commit"; exit 1; }
 
       - name: Clean toolchain artifacts
         run: rm -f cyrius-*.tar.gz
@@ -73,7 +83,7 @@ jobs:
           cp dist/rupantara.cyr "rupantara-${TAG}.cyr"
           sha256sum rupantara-*.tar.gz rupantara-*.cyr > SHA256SUMS
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-artifacts
           path: |
@@ -85,19 +95,23 @@ jobs:
     name: Create GitHub Release
     needs: [build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-artifacts
       - name: Changelog
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > /tmp/body.md
-      - uses: softprops/action-gh-release@v2
+          awk "/^## \\[${TAG}\\]/{found=1; next} /^## \\[/{if(found) exit} found{print}" CHANGELOG.md > "$RUNNER_TEMP/body.md"
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: "rupantara ${{ github.ref_name }}"
-          body_path: /tmp/body.md
+          body_path: ${{ runner.temp }}/body.md
           prerelease: ${{ startsWith(github.ref_name, '0.') || startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-rc.') || contains(github.ref_name, '-beta.') || contains(github.ref_name, '-alpha.') }}
           files: |
             rupantara-*.tar.gz

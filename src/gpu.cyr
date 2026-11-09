@@ -13,12 +13,17 @@
 #   - so per element both compute round(round(x_k*W_kj) + acc) in the same order => same bits.
 #   K<=8 means a SINGLE k-tile, so there is no cross-tile f64 accumulation to reorder. Bias MUST be 0:
 #   linear_fwd seeds y with the bias as the FIRST addend, so adding a bias after the GPU sum would change the
-#   association. K>8 (cross-tile accumulation) is a ~1 ULP tolerance match, NOT bit-exact — out of scope here.
+#   association. K>8 or a bias hands the whole problem to the CPU peer (bit-exact by construction); a GPU
+#   path for them needs cross-tile accumulation in linear_fwd's order (docs/development/roadmap.md, Follow-ons).
 #
 # PORTABILITY / SAFETY: the #83 dispatch is compiled ONLY under CYRIUS_TARGET_AGNOS. On any other target, or
 # when #83 returns < 0 (no GPU, or the boot self-test left gpu_matmul_f64_ok unproven — the normal QEMU
 # answer), each tile falls back to rosnet linear_fwd on the gathered 8x8 blocks, so the RESULT is identical
-# either way and the gather/scatter arithmetic is exercisable off-hardware. A wrong dispatch never silently
+# either way and the gather/scatter arithmetic is exercisable off-hardware. ONE target caveat (found by the
+# 0.5.2 audit): the padded 8-column fallback tile runs every column through linear_fwd's packed body, while
+# the full problem runs its last N % 4 columns through the scalar tail. Those round alike on x86_64 (the
+# GPU target), but on aarch64 the packed body is a fused FMLA, so there a ragged final tile's last N % 4
+# columns can differ from linear_fwd by that rounding (pinned in tests/tcyr/gpu.tcyr). A wrong dispatch never silently
 # corrupts a caller: the accompanying proof (programs/gpulayer.cyr) byte-compares against linear_fwd.
 # Returns the number of tiles that executed on the GPU (0 = full CPU fallback, e.g. QEMU).
 
@@ -35,6 +40,10 @@ fn linear_fwd_gpu_cpu_peer(x, W, b, y, M, K, N): i64 {
     return 0;
 }
 
+# y(M,N) = x(M,K) @ W(K,N) + b, bit-identical to rosnet linear_fwd. Runs 8x8x8 tiles on
+# the AGNOS GPU (#83) when K <= 8 and b == 0, else on the CPU (see the header). Returns
+# the number of tiles the GPU ran. NOT reentrant: the tile scratch above is module-global,
+# so two threads must not call it at once.
 fn linear_fwd_gpu(x, W, b, y, M, K, N): i64 {
     # SELF-FALLBACK. The tile path below gathers a FIXED 8x8 block (`kk < 8`, `kr < 8`)
     # with no k-tile loop, and substitutes `lfg_zbias` for `b`. So it can only represent

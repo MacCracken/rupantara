@@ -2,15 +2,7 @@
 # Known-answer checks (causal mask, log-sum-exp softmax, PV mix) + invariants.
 include "src/lib.cyr"
 include "lib/assert.cyr"
-
-fn f64_close(a, b, tol): i64 {
-    var d = f64_sub(a, b);
-    if (f64_lt(d, f64_from(0))) { d = f64_sub(f64_from(0), d); }
-    if (f64_lt(d, tol)) { return 1; }
-    return 0;
-}
-fn tol_1e2(): i64 { return f64_div(f64_from(1), f64_from(100)); }
-fn tol_1e9(): i64 { return f64_div(f64_from(1), f64_from(1000000000)); }
+include "tests/common.cyr"     # f64_close, tol_*
 
 # T=2, C=2, single head. Qc=Kc=[[1,0],[0,1]], Vc=[[10,20],[30,40]].
 # Causal: query 0 sees only key 0 -> P[0,0]=1, concat[0]=V[0]=[10,20].
@@ -74,6 +66,7 @@ fn test_attn_fwd_identity() {
     return 0;
 }
 
+# runs the suite; the exit code is the failure count
 fn main(): i64 {
     alloc_init();
     test_attn_core_known();
@@ -82,4 +75,4 @@ fn main(): i64 {
 }
 
 var rc = main();
-syscall(60, rc);
+syscall(SYS_EXIT, rc);

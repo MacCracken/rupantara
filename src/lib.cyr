@@ -30,6 +30,7 @@ include "lib/rosnet.cyr"
 
 # ================================================================
 # rupantara domain modules — flat, dependency order.
+#   guard — error codes + overflow-checked size arithmetic (0.5.2)
 # M1: the extracted transformer-forward ops from attn11.
 #   norm  — LayerNorm forward (leaf; f64 + math)
 #   act   — GELU forward (leaf; f64 + math)
@@ -37,8 +38,9 @@ include "lib/rosnet.cyr"
 #   mlp   — MLP forward (linear_fwd -> gelu -> linear_fwd)
 #   embed — token + learned-positional embedding
 #   head  — weight-tied LM head + softmax
-#   blocks— pre-norm block + block-stack model forward (+ version probe)
+#   blocks— pre-norm block + block-stack model forward (+ version probe, config check)
 # ================================================================
+include "src/guard.cyr"
 include "src/norm.cyr"
 include "src/act.cyr"
 include "src/attn.cyr"

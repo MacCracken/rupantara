@@ -19,11 +19,20 @@ without depending on attn11-the-binary. Pure Cyrius. GPL-3.0-only.
   `dist/rupantara.cyr`. New module → add to `src/lib.cyr` AND `cyrius.cyml
   [lib].modules` (dependency order).
 - `programs/smoke.cyr` — link-check (no CLI binary). `tests/tcyr/*.tcyr` —
-  standalone suites (own `main` + `assert_summary`).
+  standalone suites (own `main` + `assert_summary`). `tests/common.cyr` (shared
+  helpers) and `tests/reference.cyr` (oracles: the 0.5.1 attention cores verbatim
+  plus a naive forward) are included by suites, not run. `tests/rupantara.fcyr` is
+  the fuzz harness, `tests/rupantara.bcyr` the benchmarks.
 - **Never `cat | cycc`** — always `cyrius build`. `lib/` is a `cyrius deps`
   artifact (gitignored), never a symlink to a cyrius checkout. `cyrius.lock`
   gitignored.
-- Cyrius pin `cyrius = "6.3.27"` in `cyrius.cyml` (single source of truth).
+- The Cyrius pin (`cyrius = "…"` in `cyrius.cyml`) is the single source of truth.
+- **Optimizations must keep every output bit-identical** (ADR 0002): the attn11
+  parity contract. Gate a kernel change with the oracles in `tests/reference.cyr`.
+- **Model entries validate, leaf kernels trust** (ADR 0003). The error codes are
+  functions (`RU_ERR_*()`), not `const`, so the bundle compiles on pre-6.7 cyrius.
+- anukūlana calls the underscore layout helpers (`_cfg_*`, `_ru_o_*`, `_p_*`,
+  `_b?`, `_ru_blk_base`). Do not rename them (`docs/api.md`).
 - **Do not bump VERSION; do not run git** — the maintainer cuts releases. New
   work accretes under CHANGELOG `[Unreleased]`.
 
@@ -32,10 +41,12 @@ without depending on attn11-the-binary. Pure Cyrius. GPL-3.0-only.
 ```sh
 make build   # cyrius build programs/smoke.cyr build/rupantara_smoke
 make test    # cyrius test tests/tcyr/*.tcyr
+make fuzz    # seeded property fuzzing (tests/rupantara.fcyr)
+make bench   # benchmarks; scripts/bench-history.sh records medians
 make dist    # cyrius distlib -> dist/rupantara.cyr
 ```
 
-Definition of done each bite: `make test` green · `cyrius fmt` clean · `cyrius
-lint` no `warn ` · `make dist` regenerated. See `docs/development/roadmap.md` for
+Definition of done each bite: `make test` and `make fuzz` green · `make fmt-check`
+clean · `make lint` no `warn ` · `make doc` clean · `make dist` regenerated. See `docs/development/roadmap.md` for
 the march to v1.0 (M1 = the attn11 forward extraction — a cross-repo change that
 needs its own explicit go for the attn11 re-point).

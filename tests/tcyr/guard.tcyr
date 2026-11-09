@@ -1,0 +1,263 @@
+# tests/tcyr/guard.tcyr — the 0.5.2 argument guards and the caller-scratch entries.
+#   - ru_cfg_check accepts every supported shape and rejects each malformed field;
+#   - the sizing functions return -1 instead of dividing by zero or wrapping;
+#   - every rejected model / decode / attention call returns its code and writes
+#     NOTHING (outputs pre-filled with a sentinel stay intact) — including the KV cache
+#     on a decode past the window, which through 0.5.1 wrote past the cache;
+#   - ru_model_fwd_s / ru_model_fwd_row_s, on dirty reused scratch, equal the
+#     allocating entries bit for bit;
+#   - ru_argmax's tie / NaN / empty-row rules; ru_softmax_fwd at large logits.
+include "src/lib.cyr"
+include "lib/assert.cyr"
+include "tests/common.cyr"
+
+# a config built in fresh memory
+fn _cfg(V, C, T, nh, nkv, NL, F, bias): i64 {
+    var cfg = t_alloc(8);
+    ru_cfg_init(cfg, V, C, T, nh, nkv, NL, F, bias);
+    return cfg;
+}
+
+# every supported shape passes, GPT-2 small included
+fn test_cfg_accepts(): i64 {
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 2, 2, 32, 0)), RU_OK(), "cfg ok: MHA");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 2, 2, 32, 1)), RU_OK(), "cfg ok: MHA + bias");
+    assert_eq(ru_cfg_check(_cfg(7, 12, 6, 4, 2, 3, 48, 0)), RU_OK(), "cfg ok: GQA");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 4, 4, 1, 2, 32, 0)), RU_OK(), "cfg ok: MQA");
+    assert_eq(ru_cfg_check(_cfg(5, 6, 3, 3, 3, 0, 8, 0)), RU_OK(), "cfg ok: NL = 0");
+    assert_eq(ru_cfg_check(_cfg(1, 1, 1, 1, 1, 1, 1, 0)), RU_OK(), "cfg ok: every dim 1");
+    assert_eq(ru_cfg_check(_cfg(50257, 768, 1024, 12, 12, 12, 3072, 1)), RU_OK(), "cfg ok: GPT-2 small");
+    return 0;
+}
+
+# each malformed field, and each size that would pass 2^56 elements, is RU_ERR_CFG
+fn test_cfg_rejects(): i64 {
+    assert_eq(ru_cfg_check(0), RU_ERR_CFG(), "cfg rejects: null cfg");
+    assert_eq(ru_cfg_check(_cfg(0, 8, 5, 2, 2, 2, 32, 0)), RU_ERR_CFG(), "cfg rejects: V = 0");
+    assert_eq(ru_cfg_check(_cfg(9, 0, 5, 2, 2, 2, 32, 0)), RU_ERR_CFG(), "cfg rejects: C = 0");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 0, 2, 2, 2, 32, 0)), RU_ERR_CFG(), "cfg rejects: T = 0");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 0, 1, 2, 32, 0)), RU_ERR_CFG(), "cfg rejects: nh = 0 (divided by zero)");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 0, 2, 32, 0)), RU_ERR_CFG(), "cfg rejects: nkv = 0");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 2, -1, 32, 0)), RU_ERR_CFG(), "cfg rejects: NL < 0");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 2, 2, 0, 0)), RU_ERR_CFG(), "cfg rejects: F = 0");
+    assert_eq(ru_cfg_check(_cfg(9, 10, 5, 4, 4, 2, 32, 0)), RU_ERR_CFG(), "cfg rejects: C % nh != 0");
+    assert_eq(ru_cfg_check(_cfg(9, 12, 5, 3, 2, 2, 32, 0)), RU_ERR_CFG(), "cfg rejects: nh % nkv != 0");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 4, 2, 32, 0)), RU_ERR_CFG(), "cfg rejects: nkv > nh");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 2, 2, 32, 2)), RU_ERR_CFG(), "cfg rejects: attn_bias = 2");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 2, 2, 32, -1)), RU_ERR_CFG(), "cfg rejects: attn_bias = -1");
+    # sizes past 2^56 elements: each would have wrapped an i64 byte count somewhere
+    assert_eq(ru_cfg_check(_cfg(1099511627776, 1048576, 1, 1, 1, 1, 1, 0)), RU_ERR_CFG(), "cfg rejects: V*C overflow");
+    assert_eq(ru_cfg_check(_cfg(2, 1024, 1073741824, 1024, 1, 1, 1, 0)), RU_ERR_CFG(), "cfg rejects: nh*T*T overflow");
+    assert_eq(ru_cfg_check(_cfg(2, 2, 2, 1, 1, 1, 9223372036854775807, 0)), RU_ERR_CFG(), "cfg rejects: C*F overflow");
+    assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 2, 4611686018427387904, 32, 0)), RU_ERR_CFG(),
+      "cfg rejects: NL*blk overflow");
+    return 0;
+}
+
+# the sizing functions: unchanged counts for valid configs, -1 for invalid ones
+fn test_sizes(): i64 {
+    var cfg = _cfg(9, 8, 5, 2, 2, 2, 32, 0);
+    # emb 9*8+5*8 = 112; block 4C + 2C^2 + 2C*Ckv + 2CF + F + C = 840; + 2C
+    assert_eq(ru_params_count(cfg), 112 + 2 * 840 + 16, "ru_params_count unchanged for a valid cfg");
+    var cb = _cfg(9, 8, 5, 2, 2, 2, 32, 1);
+    assert_eq(ru_params_count(cb), 112 + 2 * (840 + 32) + 16, "ru_params_count with attn bias");
+    var cq = _cfg(7, 12, 6, 4, 2, 3, 48, 0);           # Ckv = 2 * 3 = 6
+    assert_eq(ru_decode_kv_count(cq), 2 * 3 * 6 * 6, "ru_decode_kv_count = 2*NL*T*Ckv");
+    assert_eq(ru_attn_arena_size(6, 12, 4, 2), 2 * 6 * 12 + 2 * 6 * 6 + 4 * 6 * 6, "ru_attn_arena_size (GQA)");
+    assert_eq(ru_model_scratch_count(cq), 6 * 72 + 2 * 288 + 36 + ru_attn_arena_size(6, 12, 4, 2),
+      "ru_model_scratch_count");
+    assert_eq(ru_decode_scratch_count(cq), 8 * 12 + 2 * 48 + 6 + 6, "ru_decode_scratch_count");
+    var bad = _cfg(9, 10, 5, 4, 4, 2, 32, 0);
+    assert_eq(ru_params_count(bad), RU_ERR_CFG(), "ru_params_count -1 on a bad cfg");
+    assert_eq(ru_decode_kv_count(bad), RU_ERR_CFG(), "ru_decode_kv_count -1 on a bad cfg");
+    assert_eq(ru_model_scratch_count(bad), RU_ERR_CFG(), "ru_model_scratch_count -1 on a bad cfg");
+    assert_eq(ru_decode_scratch_count(bad), RU_ERR_CFG(), "ru_decode_scratch_count -1 on a bad cfg");
+    assert_eq(ru_attn_arena_size(5, 8, 0, 1), RU_ERR_CFG(), "ru_attn_arena_size -1 at nh = 0 (divided by zero)");
+    assert_eq(ru_attn_arena_size(5, 8, 2, 4), RU_ERR_CFG(), "ru_attn_arena_size -1 at nkv > nh");
+    assert_eq(ru_attn_arena_size(1073741824, 1024, 1024, 1), RU_ERR_CFG(), "ru_attn_arena_size -1 on overflow");
+    return 0;
+}
+
+# a small model with params and tokens, shared by the forward cases
+var g_cfg = 0;
+var g_par = 0;
+var g_tok = 0;
+fn _model(V, C, T, nh, nkv, NL, F, bias, seed): i64 {
+    g_cfg = _cfg(V, C, T, nh, nkv, NL, F, bias);
+    var np = ru_params_count(g_cfg);
+    g_par = t_alloc(np);
+    fill_det(g_par, np, seed);
+    g_tok = t_alloc(T);
+    var i = 0;
+    while (i < T) { store64(g_tok + i * 8, (i * 3 + seed) % V); i = i + 1; }
+    return 0;
+}
+
+# ru_model_fwd / _s: each rejection's code, and no logits or probs written
+fn test_model_rejects(): i64 {
+    _model(9, 8, 5, 2, 2, 2, 32, 1, 1);
+    var V = 9; var T = 5;
+    var lg = t_alloc(T * V);
+    var pr = t_alloc(T * V);
+    fill_sentinel(lg, T * V);
+    fill_sentinel(pr, T * V);
+    store64(g_tok + 3 * 8, V);                          # one id past the vocab
+    assert_eq(ru_model_fwd(g_cfg, g_par, g_tok, lg, pr), RU_ERR_TOKEN(), "ru_model_fwd: token == V rejected");
+    store64(g_tok + 3 * 8, -1);
+    assert_eq(ru_model_fwd(g_cfg, g_par, g_tok, lg, pr), RU_ERR_TOKEN(), "ru_model_fwd: token -1 rejected");
+    store64(g_tok + 3 * 8, 2);
+    assert_eq(ru_model_fwd(_cfg(9, 10, 5, 4, 4, 2, 32, 0), g_par, g_tok, lg, pr), RU_ERR_CFG(),
+      "ru_model_fwd: bad cfg rejected");
+    assert_eq(ru_model_fwd(g_cfg, 0, g_tok, lg, pr), RU_ERR_ARG(), "ru_model_fwd: null params rejected");
+    assert_eq(ru_model_fwd(g_cfg, g_par, 0, lg, pr), RU_ERR_ARG(), "ru_model_fwd: null tokens rejected");
+    assert_eq(ru_model_fwd(g_cfg, g_par, g_tok, 0, pr), RU_ERR_ARG(), "ru_model_fwd: null logits rejected");
+    var sc = t_alloc(ru_model_scratch_count(g_cfg));
+    assert_eq(ru_model_fwd_s(g_cfg, g_par, g_tok, lg, pr, 0), RU_ERR_ARG(), "ru_model_fwd_s: null scratch rejected");
+    store64(g_tok, 99);
+    assert_eq(ru_model_fwd_s(g_cfg, g_par, g_tok, lg, pr, sc), RU_ERR_TOKEN(), "ru_model_fwd_s: bad token rejected");
+    store64(g_tok, 0);
+    assert_eq(sentinel_intact(lg, T * V) + sentinel_intact(pr, T * V), 2, "rejected forwards wrote no logits / probs");
+    return 0;
+}
+
+# ru_model_fwd_s on DIRTY scratch, reused across two token windows, == ru_model_fwd.
+fn test_model_scratch_bits(): i64 {
+    _model(13, 20, 7, 4, 2, 2, 30, 1, 2);
+    var V = 13; var T = 7;
+    var sc = t_alloc(ru_model_scratch_count(g_cfg));
+    fill_dirty(sc, ru_model_scratch_count(g_cfg));
+    var diffs = 0;
+    var round = 0;
+    while (round < 2) {
+        var l0 = t_alloc(T * V); var p0 = t_alloc(T * V);
+        var l1 = t_alloc(T * V); var p1 = t_alloc(T * V);
+        assert_eq(ru_model_fwd(g_cfg, g_par, g_tok, l0, p0), 0, "ru_model_fwd returns 0");
+        assert_eq(ru_model_fwd_s(g_cfg, g_par, g_tok, l1, p1, sc), 0, "ru_model_fwd_s returns 0");
+        diffs = diffs + bits_diff(l0, l1, T * V) + bits_diff(p0, p1, T * V);
+        var i = 0;
+        while (i < T) { store64(g_tok + i * 8, (i * 5 + 4) % V); i = i + 1; }   # a second window
+        round = round + 1;
+    }
+    assert_eq(diffs, 0, "ru_model_fwd_s (dirty, reused scratch) == ru_model_fwd, bit for bit");
+    return 0;
+}
+
+# Decode past the window: through 0.5.1, pos = T wrote K/V rows past the cache.
+fn test_decode_rejects(): i64 {
+    _model(9, 8, 4, 4, 1, 2, 32, 0, 3);
+    var V = 9; var T = 4;
+    var nkv = ru_decode_kv_count(g_cfg);
+    var guard = 64;
+    var kv = t_alloc(nkv + guard);                      # cache + a guard region right after it
+    fill_sentinel(kv, nkv + guard);
+    var row = t_alloc(V);
+    fill_sentinel(row, V);
+    assert_eq(ru_model_fwd_row(g_cfg, g_par, 1, T, kv, row), RU_ERR_POS(), "decode: pos == T rejected");
+    assert_eq(ru_model_fwd_row(g_cfg, g_par, 1, T + 100, kv, row), RU_ERR_POS(), "decode: pos > T rejected");
+    assert_eq(ru_model_fwd_row(g_cfg, g_par, 1, -1, kv, row), RU_ERR_POS(), "decode: pos -1 rejected");
+    assert_eq(ru_model_fwd_row(g_cfg, g_par, V, 0, kv, row), RU_ERR_TOKEN(), "decode: tok == V rejected");
+    assert_eq(ru_model_fwd_row(g_cfg, g_par, -1, 0, kv, row), RU_ERR_TOKEN(), "decode: tok -1 rejected");
+    assert_eq(ru_model_fwd_row(g_cfg, g_par, 1, 0, 0, row), RU_ERR_ARG(), "decode: null kv rejected");
+    assert_eq(ru_model_fwd_row(_cfg(9, 8, 4, 4, 3, 2, 32, 0), g_par, 1, 0, kv, row), RU_ERR_CFG(),
+      "decode: bad cfg rejected");
+    var sc = t_alloc(ru_decode_scratch_count(g_cfg));
+    assert_eq(ru_model_fwd_row_s(g_cfg, g_par, 1, 0, kv, row, 0), RU_ERR_ARG(), "decode_s: null scratch rejected");
+    assert_eq(ru_model_fwd_row_s(g_cfg, g_par, 1, T, kv, row, sc), RU_ERR_POS(), "decode_s: pos == T rejected");
+    assert_eq(sentinel_intact(kv, nkv + guard) + sentinel_intact(row, V), 2,
+      "rejected decode steps wrote nothing: KV cache, the region past it, logits");
+    # the last valid position still runs and stays inside the cache
+    var p = 0;
+    while (p < T) { assert_eq(ru_model_fwd_row(g_cfg, g_par, 1, p, kv, row), 0, "decode: pos < T runs"); p = p + 1; }
+    assert_eq(sentinel_intact(kv + nkv * 8, guard), 1, "a full-window decode writes nothing past the cache");
+    return 0;
+}
+
+# A full decode on one DIRTY scratch block == the allocating step == the batch rows.
+fn test_decode_scratch_bits(): i64 {
+    _model(11, 12, 6, 6, 2, 3, 40, 1, 4);
+    var V = 11; var T = 6;
+    var batch = t_alloc(T * V);
+    ru_model_fwd(g_cfg, g_par, g_tok, batch, 0);
+    var kv0 = t_alloc(ru_decode_kv_count(g_cfg));
+    var kv1 = t_alloc(ru_decode_kv_count(g_cfg));
+    var sc = t_alloc(ru_decode_scratch_count(g_cfg));
+    fill_dirty(sc, ru_decode_scratch_count(g_cfg));
+    var r0 = t_alloc(V);
+    var r1 = t_alloc(V);
+    var diffs = 0;
+    var pos = 0;
+    while (pos < T) {
+        var tok = load64(g_tok + pos * 8);
+        ru_model_fwd_row(g_cfg, g_par, tok, pos, kv0, r0);
+        ru_model_fwd_row_s(g_cfg, g_par, tok, pos, kv1, r1, sc);
+        diffs = diffs + bits_diff(r0, r1, V) + bits_diff(r1, batch + pos * V * 8, V);
+        pos = pos + 1;
+    }
+    assert_eq(diffs, 0, "ru_model_fwd_row_s (dirty scratch) == ru_model_fwd_row == batch rows, bit for bit");
+    return 0;
+}
+
+# ru_attn_fwd: pos_kind != 0 and a bad shape are rejected before any write
+fn test_attn_fwd_rejects(): i64 {
+    var T = 2; var C = 2;
+    var I = t_alloc(C * C);
+    store64(I, f64_from(1)); store64(I + 24, f64_from(1));
+    var x = t_alloc(T * C);
+    fill_det(x, T * C, 5);
+    var out = t_alloc(T * C);
+    var ar = t_alloc(ru_attn_arena_size(T, C, 1, 1));
+    fill_sentinel(out, T * C);
+    assert_eq(ru_attn_fwd(I, 0, I, 0, I, 0, I, 0, x, out, ar, T, C, 1, 1, 1), RU_ERR_ARG(),
+      "ru_attn_fwd: pos_kind = 1 (RoPE, not implemented) rejected");
+    assert_eq(ru_attn_fwd(I, 0, I, 0, I, 0, I, 0, x, out, ar, T, C, 0, 1, 0), RU_ERR_CFG(),
+      "ru_attn_fwd: nh = 0 rejected");
+    assert_eq(sentinel_intact(out, T * C), 1, "rejected ru_attn_fwd wrote nothing");
+    assert_eq(ru_attn_fwd(I, 0, I, 0, I, 0, I, 0, x, out, ar, T, C, 1, 1, 0), 0, "ru_attn_fwd: pos_kind = 0 runs");
+    return 0;
+}
+
+# ru_argmax: ties, NaN, and the empty row
+fn test_argmax(): i64 {
+    var lg = t_alloc(5);
+    store64(lg, f64_from(1)); store64(lg + 8, f64_from(3)); store64(lg + 16, f64_from(3));
+    store64(lg + 24, f64_from(2)); store64(lg + 32, f64_from(-7));
+    assert_eq(ru_argmax(lg, 5), 1, "argmax: a tie goes to the lowest index");
+    store64(lg + 8, 0x7FF8000000000000);                 # NaN at 1
+    assert_eq(ru_argmax(lg, 5), 2, "argmax: a NaN past index 0 never wins");
+    store64(lg, 0x7FF8000000000000);                     # NaN at 0
+    assert_eq(ru_argmax(lg, 5), 0, "argmax: NaN at index 0 stays the answer (documented)");
+    assert_eq(ru_argmax(lg, 0), RU_ERR_ARG(), "argmax: V = 0 rejected");
+    return 0;
+}
+
+# Max-subtracted softmax stays finite at logits far past exp's range.
+fn test_softmax_large(): i64 {
+    var lg = t_alloc(3);
+    var pr = t_alloc(3);
+    store64(lg, f64_from(1000)); store64(lg + 8, f64_from(1001)); store64(lg + 16, f64_from(-1000));
+    ru_softmax_fwd(lg, pr, 1, 3);
+    var s = f64_add(f64_add(load64(pr), load64(pr + 8)), load64(pr + 16));
+    assert(f64_close(s, f64_from(1), tol_1e9()), "softmax at |logit| = 1000 sums to 1");
+    assert(f64_gt(load64(pr + 8), load64(pr)) == 1, "softmax at 1000 / 1001 keeps the order");
+    assert_eq(load64(pr + 16), f64_from(0), "softmax: exp(-2001) underflows to exactly 0");
+    return 0;
+}
+
+# runs the suite; the exit code is the failure count
+fn main(): i64 {
+    alloc_init();
+    test_cfg_accepts();
+    test_cfg_rejects();
+    test_sizes();
+    test_model_rejects();
+    test_model_scratch_bits();
+    test_decode_rejects();
+    test_decode_scratch_bits();
+    test_attn_fwd_rejects();
+    test_argmax();
+    test_softmax_large();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

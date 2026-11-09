@@ -7,6 +7,7 @@
 fn _ru_gelu_c(): i64 { return f64_sqrt(f64_div(f64_from(2), F64_PI)); }          # sqrt(2/pi)
 fn _ru_gelu_a(): i64 { return f64_div(f64_from(44715), f64_from(1000000)); }     # 0.044715
 
+# y[i] = gelu(x[i]) for i < n (the tanh form above). A leaf kernel: y may alias x.
 fn ru_gelu_fwd(x, y, n): i64 {
     var c = _ru_gelu_c();
     var a = _ru_gelu_a();

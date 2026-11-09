@@ -1,0 +1,139 @@
+# tests/tcyr/reference.tcyr — 0.5.2's optimized kernels against the oracles in
+# tests/reference.cyr.
+#   - ru_attn_core_fwd / ru_attn_core_fwd_row == the 0.5.1 loops, BIT FOR BIT, at head
+#     dims covering every hd % 4 tail (the f64v_axpy body / scalar tail split), MHA,
+#     GQA and MQA, T = 1;
+#   - _ru_add_rows == the scalar loop, bit for bit, at every n % 2 and when aliased;
+#   - ru_model_fwd == an independent plain-loop forward within 1e-9 (relative), which
+#     checks the packed layout and the GQA head map against the documented layout.
+include "src/lib.cyr"
+include "lib/assert.cyr"
+include "tests/common.cyr"
+include "tests/reference.cyr"
+
+# The batch core vs the 0.5.1 batch core, and the row core vs the 0.5.1 row core, on
+# one random (T, C, nh, nkv) problem. Bits compared: Pc, concat, and the row outputs.
+fn _core_case(T, C, nh, nkv, seed, name): i64 {
+    rng_seed64(seed);
+    var Ckv = nkv * (C / nh);
+    var Q = t_alloc(T * C);
+    var K = t_alloc(T * Ckv);
+    var Vv = t_alloc(T * Ckv);
+    fill_rng(Q, T * C);
+    fill_rng(K, T * Ckv);
+    fill_rng(Vv, T * Ckv);
+    var P1 = t_alloc(nh * T * T);
+    var P0 = t_alloc(nh * T * T);
+    var c1 = t_alloc(T * C);
+    var c0 = t_alloc(T * C);
+    ru_attn_core_fwd(Q, K, Vv, P1, c1, T, C, nh, nkv);
+    _ref051_attn_core_fwd(Q, K, Vv, P0, c0, T, C, nh, nkv);
+    assert_eq(bits_diff(P1, P0, nh * T * T) + bits_diff(c1, c0, T * C), 0, name);
+    # every row position of the cached core, against the 0.5.1 cached core
+    var pr1 = t_alloc(T);
+    var pr0 = t_alloc(T);
+    var r1 = t_alloc(C);
+    var r0 = t_alloc(C);
+    var diffs = 0;
+    var pos = 0;
+    while (pos < T) {
+        ru_attn_core_fwd_row(Q + pos * C * 8, K, Vv, pr1, r1, pos, C, nh, nkv);
+        _ref051_attn_core_fwd_row(Q + pos * C * 8, K, Vv, pr0, r0, pos, C, nh, nkv);
+        diffs = diffs + bits_diff(r1, r0, C);
+        # and the row core agrees with the batch core's row `pos`
+        diffs = diffs + bits_diff(r1, c1 + pos * C * 8, C);
+        pos = pos + 1;
+    }
+    assert_eq(diffs, 0, name);
+    return 0;
+}
+
+# ten shapes: every hd % 4 tail, MHA / GQA / MQA, T = 1
+fn test_core_bits(): i64 {
+    _core_case(1, 4, 1, 1, 11, "core == 0.5.1 (T=1, hd=4)");
+    _core_case(5, 8, 2, 2, 12, "core == 0.5.1 (MHA hd=4)");
+    _core_case(6, 10, 2, 1, 13, "core == 0.5.1 (MQA hd=5)");
+    _core_case(7, 18, 3, 3, 14, "core == 0.5.1 (MHA hd=6)");
+    _core_case(4, 28, 4, 2, 15, "core == 0.5.1 (GQA hd=7)");
+    _core_case(9, 36, 4, 4, 16, "core == 0.5.1 (MHA hd=9)");
+    _core_case(8, 48, 6, 3, 17, "core == 0.5.1 (GQA 2/group hd=8)");
+    _core_case(3, 3, 3, 1, 18, "core == 0.5.1 (MQA hd=1)");
+    _core_case(6, 96, 6, 2, 19, "core == 0.5.1 (GQA hd=16)");
+    _core_case(5, 22, 2, 2, 20, "core == 0.5.1 (MHA hd=11)");
+    return 0;
+}
+
+# _ru_add_rows vs the scalar loop at n = 0..9, out of place and in place (dst == a).
+fn test_add_rows_bits(): i64 {
+    rng_seed64(21);
+    var a = t_alloc(10);
+    var b = t_alloc(10);
+    var d1 = t_alloc(10);
+    var d0 = t_alloc(10);
+    var diffs = 0;
+    var n = 0;
+    while (n < 10) {
+        fill_rng(a, 10);
+        fill_rng(b, 10);
+        fill_sentinel(d1, 10);
+        fill_sentinel(d0, 10);
+        _ru_add_rows(d1, a, b, n);
+        _ref_add_rows(d0, a, b, n);
+        diffs = diffs + bits_diff(d1, d0, 10);           # the slots past n stay sentinel in both
+        t_copy(d1, a, 10);
+        _ru_add_rows(d1, d1, b, n);
+        _ref_add_rows(a, a, b, n);
+        diffs = diffs + bits_diff(d1, a, 10);
+        n = n + 1;
+    }
+    assert_eq(diffs, 0, "_ru_add_rows == scalar loop (n = 0..9, aliased and not, no write past n)");
+    return 0;
+}
+
+# ru_model_fwd vs the naive forward, relative 1e-9 on every logit.
+fn _model_case(V, C, T, nh, nkv, NL, F, bias, seed, name): i64 {
+    rng_seed64(seed);
+    var cfg = t_alloc(8);
+    ru_cfg_init(cfg, V, C, T, nh, nkv, NL, F, bias);
+    var np = ru_params_count(cfg);
+    var params = t_alloc(np);
+    fill_det(params, np, seed);
+    var tokens = t_alloc(T);
+    var i = 0;
+    while (i < T) { store64(tokens + i * 8, rng_below(V)); i = i + 1; }
+    var lr = t_alloc(T * V);
+    var ln = t_alloc(T * V);
+    ru_model_fwd(cfg, params, tokens, lr, 0);
+    _naive_model_fwd(V, C, T, nh, nkv, NL, F, bias, params, tokens, ln);
+    var bad = 0;
+    i = 0;
+    while (i < T * V) {
+        if (f64_close_rel(load64(lr + i * 8), load64(ln + i * 8), tol_1e9()) == 0) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, name);
+    return 0;
+}
+
+# six configs: bias on and off, GQA, MQA, F != 4C, NL = 0
+fn test_model_vs_naive(): i64 {
+    _model_case(9, 8, 5, 2, 2, 2, 32, 0, 31, "ru_model_fwd ~ naive (MHA, no bias)");
+    _model_case(9, 8, 5, 2, 2, 2, 32, 1, 32, "ru_model_fwd ~ naive (MHA, bias)");
+    _model_case(7, 12, 6, 4, 2, 3, 48, 1, 33, "ru_model_fwd ~ naive (GQA, 3 blocks, bias)");
+    _model_case(11, 12, 4, 6, 1, 2, 20, 0, 34, "ru_model_fwd ~ naive (MQA, hd=2)");
+    _model_case(13, 20, 7, 4, 4, 1, 30, 1, 35, "ru_model_fwd ~ naive (hd=5, F != 4C)");
+    _model_case(5, 6, 3, 3, 3, 0, 8, 0, 36, "ru_model_fwd ~ naive (NL = 0: embed -> LN -> head)");
+    return 0;
+}
+
+# runs the suite; the exit code is the failure count
+fn main(): i64 {
+    alloc_init();
+    test_core_bits();
+    test_add_rows_bits();
+    test_model_vs_naive();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

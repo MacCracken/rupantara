@@ -52,6 +52,7 @@ fn _decode_parity(V, C, T, nh, nkv, NL, F, bias, name): i64 {
     return 0;
 }
 
+# the four configs: MHA with and without bias, GQA over 3 blocks, MQA
 fn test_decode_parity(): i64 {
     _decode_parity(9, 8, 5, 2, 2, 2, 32, 0, "kv-decode==uncached mha-dense-nobias");
     _decode_parity(9, 8, 5, 2, 2, 2, 32, 1, "kv-decode==uncached mha-dense-bias");
@@ -84,6 +85,7 @@ fn test_greedy_gen(): i64 {
     return 0;
 }
 
+# runs the suite; the exit code is the failure count
 fn main(): i64 {
     alloc_init();
     test_decode_parity();
@@ -92,4 +94,4 @@ fn main(): i64 {
 }
 
 var rc = main();
-syscall(60, rc);
+syscall(SYS_EXIT, rc);

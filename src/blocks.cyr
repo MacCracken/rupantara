@@ -20,19 +20,20 @@
 # With attn bias, bq(C) bk(Ckv) bv(Ckv) bo(C) are appended after the base block
 # (Ckv = nkv*(C/nh)); the base weight offsets are unchanged.
 
-# Packed version int: major*10000 + minor*100 + patch (0.5.1 -> 501).
+# Packed version int: major*10000 + minor*100 + patch (0.5.2 -> 502).
 # NOTE: this constant sat at 400 through the whole of 0.4.1 — the 0.4.1 cut moved VERSION
 # and the CHANGELOG but not this function, and tests/tcyr/smoke.tcyr asserted the stale
 # value with a message naming 0.4.0, so the gate confirmed the bug instead of catching it.
 # It drifted again through 0.4.3 (still 402). CI's docs job now checks it against VERSION.
 # Bump BOTH on every cut.
 fn rupantara_version(): i64 {
-    return 501;
+    return 502;
 }
 
 # ---- config descriptor (8 i64) ---------------------------------------------
 # A caller-owned i64[8]: V, C, T, nh, nkv, NL, F, attn_bias. F is explicit (GPT-2
-# uses 4*C) so a consumer with a different MLP ratio is not forced to 4*C.
+# uses 4*C) so a consumer with a different MLP ratio is not forced to 4*C. Stores the
+# fields as given; ru_cfg_check validates them (every model entry runs it).
 fn ru_cfg_init(cfg, V, C, T, nh, nkv, NL, F, attn_bias): i64 {
     store64(cfg, V);
     store64(cfg + 8, C);
@@ -53,6 +54,28 @@ fn _cfg_NL(cfg): i64 { return load64(cfg + 40); }
 fn _cfg_F(cfg): i64 { return load64(cfg + 48); }
 fn _cfg_bias(cfg): i64 { return load64(cfg + 56); }
 fn _cfg_Ckv(cfg): i64 { return _cfg_nkv(cfg) * (_cfg_C(cfg) / _cfg_nh(cfg)); }
+
+# 0 (RU_OK) when cfg describes a model every rupantara buffer and index can represent,
+# else RU_ERR_CFG (-1). Checks: cfg != 0; V, C, T, nh, nkv, F >= 1 and NL >= 0;
+# C % nh == 0 (whole heads); nh % nkv == 0 (whole GQA groups — nkv <= nh follows);
+# attn_bias is 0 or 1; and every buffer the config sizes — the packed params, the
+# forward scratch, the KV cache, the decode scratch and the (T, V) logits — stays
+# within _RU_MAX_ELEMS(), so no element count or byte offset wraps. Through 0.5.1
+# nothing checked: nh = 0 or nkv > nh divided by zero, C % nh != 0 left concat columns
+# unwritten, nh % nkv != 0 sent heads past the last K/V head (reads off the end of the
+# K/V rows), and attn_bias = 2 sized the block without biases but read them anyway.
+fn ru_cfg_check(cfg): i64 {
+    if (cfg == 0) { return RU_ERR_CFG(); }
+    if (_cfg_V(cfg) < 1 || _cfg_F(cfg) < 1 || _cfg_NL(cfg) < 0) { return RU_ERR_CFG(); }
+    if (_ru_attn_dims_ok(_cfg_T(cfg), _cfg_C(cfg), _cfg_nh(cfg), _cfg_nkv(cfg)) == 0) { return RU_ERR_CFG(); }
+    if (_cfg_bias(cfg) != 0 && _cfg_bias(cfg) != 1) { return RU_ERR_CFG(); }
+    if (_ru_params_c(cfg) < 0) { return RU_ERR_CFG(); }
+    if (_ru_model_scratch_c(cfg) < 0) { return RU_ERR_CFG(); }
+    if (_ru_decode_kv_c(cfg) < 0) { return RU_ERR_CFG(); }
+    if (_ru_decode_scratch_c(cfg) < 0) { return RU_ERR_CFG(); }
+    if (_ru_mulc(_cfg_T(cfg), _cfg_V(cfg)) < 0) { return RU_ERR_CFG(); }
+    return RU_OK();
+}
 
 # ---- within-block element offsets (mirror attn11's _o_*) --------------------
 fn _ru_o_ln1g(cfg): i64 { return 0; }
@@ -98,8 +121,34 @@ fn _bk(cfg, pblk): i64 { if (_cfg_bias(cfg) == 0) { return 0; } return pblk + _r
 fn _bv(cfg, pblk): i64 { if (_cfg_bias(cfg) == 0) { return 0; } return pblk + _ru_o_bv(cfg) * 8; }
 fn _bo(cfg, pblk): i64 { if (_cfg_bias(cfg) == 0) { return 0; } return pblk + _ru_o_bo(cfg) * 8; }
 
-# total packed parameter count (elements) — sizes a params buffer for a config.
-fn ru_params_count(cfg): i64 { return _ru_emb_end(cfg) + _cfg_NL(cfg) * _ru_blk(cfg) + 2 * _cfg_C(cfg); }
+# Total packed parameter count (elements) — sizes a params buffer for a config. The
+# same count as ever for a valid config; RU_ERR_CFG (-1) when ru_cfg_check rejects it
+# (through 0.5.1 a huge config could wrap this to a small positive count).
+fn ru_params_count(cfg): i64 {
+    if (ru_cfg_check(cfg) != 0) { return RU_ERR_CFG(); }
+    return _ru_params_c(cfg);
+}
+
+# Checked block size: _ru_blk's formula with overflow-checked arithmetic, or -1.
+fn _ru_blk_c(cfg): i64 {
+    var C = _cfg_C(cfg);
+    var F = _cfg_F(cfg);
+    var Ckv = _cfg_Ckv(cfg);
+    var s = _ru_mulc(4, C);
+    s = _ru_addc(s, _ru_mulc(2, _ru_mulc(C, C)));
+    s = _ru_addc(s, _ru_mulc(2, _ru_mulc(C, Ckv)));
+    s = _ru_addc(s, _ru_addc(_ru_mulc(2, _ru_mulc(C, F)), _ru_addc(F, C)));
+    if (_cfg_bias(cfg) == 1) { s = _ru_addc(s, _ru_addc(_ru_mulc(2, C), _ru_mulc(2, Ckv))); }
+    return s;
+}
+
+# Checked packed parameter count: emb_end + NL*blk + 2C, or -1.
+fn _ru_params_c(cfg): i64 {
+    var C = _cfg_C(cfg);
+    var s = _ru_addc(_ru_mulc(_cfg_V(cfg), C), _ru_mulc(_cfg_T(cfg), C));
+    s = _ru_addc(s, _ru_mulc(_cfg_NL(cfg), _ru_blk_c(cfg)));
+    return _ru_addc(s, _ru_mulc(2, C));
+}
 
 # ---- pre-norm block forward -------------------------------------------------
 # xmid = xin + Attn(LN1(xin)); xout = xmid + MLP(LN2(xmid)). Safe in place
@@ -107,7 +156,8 @@ fn ru_params_count(cfg): i64 { return _ru_emb_end(cfg) + _cfg_NL(cfg) * _ru_blk(
 # residual add writes xout. pblk = params + _ru_blk_base(cfg, L)*8. Scratch: a /
 # attn_out / b / mlp_out (T*C each), fc / gg (T*F each), m1/r1/m2/r2 (T each),
 # arena (ru_attn_arena_size). Bit-identical to attn11's _attn_block_fwd + the MLP
-# leg of model_forward (dropout off).
+# leg of model_forward (dropout off). A building block: cfg and the buffers are
+# trusted (run ru_cfg_check first); the residual adds are _ru_add_rows.
 fn ru_block_fwd(cfg, pblk, xin, xout, a, attn_out, b, mlp_out, fc, gg, m1, r1, m2, r2, arena): i64 {
     var C = _cfg_C(cfg);
     var T = _cfg_T(cfg);
@@ -120,31 +170,81 @@ fn ru_block_fwd(cfg, pblk, xin, xout, a, attn_out, b, mlp_out, fc, gg, m1, r1, m
     ru_attn_fwd(pblk + _ru_o_Wq(cfg) * 8, _bq(cfg, pblk), pblk + _ru_o_Wk(cfg) * 8, _bk(cfg, pblk),
       pblk + _ru_o_Wv(cfg) * 8, _bv(cfg, pblk), pblk + _ru_o_Wo(cfg) * 8, _bo(cfg, pblk),
       a, attn_out, arena, T, C, nh, nkv, 0);
-    var i = 0;
-    while (i < TC) {
-        store64(xout + i * 8, f64_add(load64(xin + i * 8), load64(attn_out + i * 8)));
-        i = i + 1;
-    }
+    _ru_add_rows(xout, xin, attn_out, TC);
     # x'' = x' + MLP(LN2(x'))
     ru_ln_fwd(xout, pblk + _ru_o_ln2g(cfg) * 8, pblk + _ru_o_ln2b(cfg) * 8, b, m2, r2, T, C);
     ru_mlp_fwd(b, pblk + _ru_o_Wfc(cfg) * 8, pblk + _ru_o_bfc(cfg) * 8, pblk + _ru_o_Wproj(cfg) * 8,
       pblk + _ru_o_bproj(cfg) * 8, fc, gg, mlp_out, T, C, F);
-    i = 0;
-    while (i < TC) {
-        store64(xout + i * 8, f64_add(load64(xout + i * 8), load64(mlp_out + i * 8)));
-        i = i + 1;
-    }
+    _ru_add_rows(xout, xout, mlp_out, TC);
     return 0;
 }
 
 # ---- block-stack model forward ----------------------------------------------
-# tokens(n integer ids, n == T) -> logits(T,V) and, if probs != 0, probs(T,V).
+# Forward scratch: x a attn_out b mlp_out af (T*C each) | fc gg (T*F each) |
+# m1 r1 m2 r2 meanf rstdf (T each) | the attention arena. Every slot is written before
+# it is read, so the block may be reused across calls without clearing (pinned by the
+# dirty-scratch cases in tests/tcyr/guard.tcyr and the fuzz harness).
+fn _ru_model_scratch_c(cfg): i64 {
+    var T = _cfg_T(cfg);
+    var s = _ru_mulc(6, _ru_mulc(T, _cfg_C(cfg)));
+    s = _ru_addc(s, _ru_mulc(2, _ru_mulc(T, _cfg_F(cfg))));
+    s = _ru_addc(s, _ru_mulc(6, T));
+    return _ru_addc(s, _ru_arena_c(T, _cfg_C(cfg), _cfg_nh(cfg), _cfg_nkv(cfg)));
+}
+
+# f64 count of the caller-owned scratch ru_model_fwd_s needs, or RU_ERR_CFG (-1).
+fn ru_model_scratch_count(cfg): i64 {
+    if (ru_cfg_check(cfg) != 0) { return RU_ERR_CFG(); }
+    return _ru_model_scratch_c(cfg);
+}
+
+# The checks every model-forward entry runs before writing: the config, the buffers it
+# writes or reads (probs may be 0), and each of the T token ids against [0, V).
+fn _ru_model_args(cfg, params, tokens, logits): i64 {
+    var rc = ru_cfg_check(cfg);
+    if (rc != 0) { return rc; }
+    if (params == 0 || tokens == 0 || logits == 0) { return RU_ERR_ARG(); }
+    var V = _cfg_V(cfg);
+    var T = _cfg_T(cfg);
+    var t = 0;
+    while (t < T) {
+        var tok = load64(tokens + t * 8);
+        if (tok < 0 || tok >= V) { return RU_ERR_TOKEN(); }
+        t = t + 1;
+    }
+    return RU_OK();
+}
+
+# tokens(T integer ids) -> logits(T,V) and, if probs != 0, probs(T,V), using the
+# caller-owned `scratch` (ru_model_scratch_count(cfg) f64) — no allocation, so a caller
+# that runs the forward in a loop reuses one block. Returns 0, or (before writing
+# anything) RU_ERR_CFG / RU_ERR_ARG (a 0 params, tokens, logits or scratch) /
+# RU_ERR_TOKEN (an id outside [0, V)). Bit-identical to ru_model_fwd.
+# A prompt shorter than T: pad tokens to T with any valid id — attention is causal, so
+# logits rows 0..n-1 do not depend on the padding.
+fn ru_model_fwd_s(cfg, params, tokens, logits, probs, scratch): i64 {
+    var rc = _ru_model_args(cfg, params, tokens, logits);
+    if (rc != 0) { return rc; }
+    if (scratch == 0) { return RU_ERR_ARG(); }
+    return _ru_model_fwd_core(cfg, params, tokens, logits, probs, scratch);
+}
+
+# tokens(T integer ids) -> logits(T,V) and, if probs != 0, probs(T,V).
 # embed -> NL pre-norm blocks (rolling residual, in place) -> final LN ->
-# weight-tied head -> softmax. Allocates its working scratch via t_alloc (a
-# reference forward; a caller-scratch variant is a later hardening step). Mirrors
-# attn11's model_forward with dropout off — bit-identical logits given identical
-# packed params + tokens.
+# weight-tied head -> softmax. Mirrors attn11's model_forward with dropout off —
+# bit-identical logits given identical packed params + tokens. Returns as
+# ru_model_fwd_s does. ALLOCATES its scratch (one t_alloc of
+# ru_model_scratch_count(cfg) f64 per call; through 0.5.1, fifteen) and the bump
+# allocator never frees it: a caller that runs the forward repeatedly should use
+# ru_model_fwd_s with one reused scratch block instead.
 fn ru_model_fwd(cfg, params, tokens, logits, probs): i64 {
+    var rc = _ru_model_args(cfg, params, tokens, logits);
+    if (rc != 0) { return rc; }
+    return _ru_model_fwd_core(cfg, params, tokens, logits, probs, t_alloc(_ru_model_scratch_c(cfg)));
+}
+
+# The forward body over a validated cfg / tokens and a scratch block (layout above).
+fn _ru_model_fwd_core(cfg, params, tokens, logits, probs, scratch): i64 {
     var V = _cfg_V(cfg);
     var C = _cfg_C(cfg);
     var T = _cfg_T(cfg);
@@ -153,21 +253,21 @@ fn ru_model_fwd(cfg, params, tokens, logits, probs): i64 {
     var NL = _cfg_NL(cfg);
     var TC = T * C;
     var TF = T * _cfg_F(cfg);
-    var x = t_alloc(TC);
-    var a = t_alloc(TC);
-    var attn_out = t_alloc(TC);
-    var b = t_alloc(TC);
-    var mlp_out = t_alloc(TC);
-    var fc = t_alloc(TF);
-    var gg = t_alloc(TF);
-    var m1 = t_alloc(T);
-    var r1 = t_alloc(T);
-    var m2 = t_alloc(T);
-    var r2 = t_alloc(T);
-    var arena = t_alloc(ru_attn_arena_size(T, C, nh, nkv));
-    var af = t_alloc(TC);
-    var meanf = t_alloc(T);
-    var rstdf = t_alloc(T);
+    var x = scratch;
+    var a = x + TC * 8;
+    var attn_out = a + TC * 8;
+    var b = attn_out + TC * 8;
+    var mlp_out = b + TC * 8;
+    var af = mlp_out + TC * 8;
+    var fc = af + TC * 8;
+    var gg = fc + TF * 8;
+    var m1 = gg + TF * 8;
+    var r1 = m1 + T * 8;
+    var m2 = r1 + T * 8;
+    var r2 = m2 + T * 8;
+    var meanf = r2 + T * 8;
+    var rstdf = meanf + T * 8;
+    var arena = rstdf + T * 8;
     ru_embed_fwd(tokens, _p_tokemb(params), _p_posemb(params, cfg), x, T, C);
     var L = 0;
     while (L < NL) {

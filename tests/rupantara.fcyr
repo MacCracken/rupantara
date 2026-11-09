@@ -1,0 +1,218 @@
+# rupantara fuzz harness — deterministic property fuzzing of the forward entries.
+#
+# rupantara parses no external bytes; what it is handed is a config, packed params,
+# token ids and decode positions. So each round draws a random model shape (nh 1..6,
+# nkv a random divisor of nh, hd 1..12 so every hd % 4 tail occurs, T 1..9, V 1..24,
+# NL 0..3, F 1..40, attn bias on or off) and random inputs (tests/common.cyr's
+# rng_val: a 2^20 grid in [-1, 1) with ±0, subnormals and ±1000 mixed in), then checks:
+#   P1 ru_model_fwd_s on DIRTY scratch == ru_model_fwd, bit for bit (logits + probs)
+#   P2 a cached decode on one dirty scratch block == the batch rows, bit for bit
+#   P3 ru_attn_core_fwd / _row == the 0.5.1 loops (tests/reference.cyr), bit for bit
+#   P4 ru_model_fwd ~ the naive plain-loop forward, relative 1e-9 (bounded params)
+#   P5 a malformed config / token / position is rejected with its code, and every
+#      output — the KV cache included — keeps its sentinel
+# 20,000 rounds; the bump heap is rewound each round (alloc_reset), so memory stays
+# flat. Seeded (splitmix64), so a failure reproduces exactly; the failing round and the
+# property are printed. Exit 0 = every property held in every round.
+include "src/lib.cyr"
+include "tests/common.cyr"
+include "tests/reference.cyr"
+
+var _fz_fail = 0;
+var _nl = "\n";
+
+fn _say(s): i64 { sys_write(1, s, strlen(s)); return 0; }
+
+# records and prints a failed property (ok == 0)
+fn fz_check(ok, round, what): i64 {
+    if (ok == 0) {
+        _fz_fail = _fz_fail + 1;
+        _say("FUZZ FAIL round ");
+        fmt_int(round);
+        _say(": ");
+        _say(what);
+        _say(_nl);
+    }
+    return 0;
+}
+
+# a random valid config in fresh memory
+fn fz_cfg(): i64 {
+    var nh = 1 + rng_below(6);
+    var nkv = nh;
+    var pick = rng_below(nh);                    # a random divisor of nh
+    var d = 1;
+    var seen = 0;
+    while (d <= nh) {
+        if (nh % d == 0) {
+            if (seen == pick % 4) { nkv = d; }
+            seen = seen + 1;
+        }
+        d = d + 1;
+    }
+    var hd = 1 + rng_below(12);
+    var cfg = t_alloc(8);
+    ru_cfg_init(cfg, 1 + rng_below(24), nh * hd, 1 + rng_below(9), nh, nkv,
+      rng_below(4), 1 + rng_below(40), rng_below(2));
+    return cfg;
+}
+
+# T random token ids in [0, V)
+fn fz_tokens(cfg): i64 {
+    var T = _cfg_T(cfg);
+    var tok = t_alloc(T);
+    var i = 0;
+    while (i < T) { store64(tok + i * 8, rng_below(_cfg_V(cfg))); i = i + 1; }
+    return tok;
+}
+
+# P1 + P2 + P4 on one random model
+fn fz_model(round): i64 {
+    var cfg = fz_cfg();
+    fz_check(ru_cfg_check(cfg) == 0, round, "a generated config was rejected");
+    var V = _cfg_V(cfg);
+    var T = _cfg_T(cfg);
+    var np = ru_params_count(cfg);
+    var params = t_alloc(np);
+    fill_rng(params, np);
+    var tok = fz_tokens(cfg);
+    var l0 = t_alloc(T * V); var p0 = t_alloc(T * V);
+    var l1 = t_alloc(T * V); var p1 = t_alloc(T * V);
+    var ns = ru_model_scratch_count(cfg);
+    var sc = t_alloc(ns);
+    fill_dirty(sc, ns);
+    ru_model_fwd(cfg, params, tok, l0, p0);
+    ru_model_fwd_s(cfg, params, tok, l1, p1, sc);
+    fz_check(bits_diff(l0, l1, T * V) + bits_diff(p0, p1, T * V) == 0, round,
+      "P1 ru_model_fwd_s (dirty scratch) != ru_model_fwd");
+    # P2: decode every position on one dirty scratch block
+    var kv = t_alloc(ru_decode_kv_count(cfg));
+    var nds = ru_decode_scratch_count(cfg);
+    var ds = t_alloc(nds);
+    fill_dirty(ds, nds);
+    var row = t_alloc(V);
+    var diffs = 0;
+    var pos = 0;
+    while (pos < T) {
+        ru_model_fwd_row_s(cfg, params, load64(tok + pos * 8), pos, kv, row, ds);
+        diffs = diffs + bits_diff(row, l0 + pos * V * 8, V);
+        pos = pos + 1;
+    }
+    fz_check(diffs == 0, round, "P2 cached decode != batch rows");
+    # P4: bounded params against the naive forward
+    fill_det(params, np, round);
+    ru_model_fwd(cfg, params, tok, l0, 0);
+    _naive_model_fwd(V, _cfg_C(cfg), T, _cfg_nh(cfg), _cfg_nkv(cfg), _cfg_NL(cfg), _cfg_F(cfg),
+      _cfg_bias(cfg), params, tok, l1);
+    var bad = 0;
+    var i = 0;
+    while (i < T * V) {
+        if (f64_close_rel(load64(l0 + i * 8), load64(l1 + i * 8), tol_1e9()) == 0) { bad = bad + 1; }
+        i = i + 1;
+    }
+    fz_check(bad == 0, round, "P4 ru_model_fwd differs from the naive forward past 1e-9");
+    return 0;
+}
+
+# P3: both attention cores against the 0.5.1 loops
+fn fz_core(round): i64 {
+    var cfg = fz_cfg();
+    var T = _cfg_T(cfg);
+    var C = _cfg_C(cfg);
+    var nh = _cfg_nh(cfg);
+    var nkv = _cfg_nkv(cfg);
+    var Ckv = _cfg_Ckv(cfg);
+    var Q = t_alloc(T * C); var K = t_alloc(T * Ckv); var Vv = t_alloc(T * Ckv);
+    fill_rng(Q, T * C); fill_rng(K, T * Ckv); fill_rng(Vv, T * Ckv);
+    var P1 = t_alloc(nh * T * T); var P0 = t_alloc(nh * T * T);
+    var c1 = t_alloc(T * C); var c0 = t_alloc(T * C);
+    ru_attn_core_fwd(Q, K, Vv, P1, c1, T, C, nh, nkv);
+    _ref051_attn_core_fwd(Q, K, Vv, P0, c0, T, C, nh, nkv);
+    fz_check(bits_diff(P1, P0, nh * T * T) + bits_diff(c1, c0, T * C) == 0, round,
+      "P3 ru_attn_core_fwd != the 0.5.1 core");
+    var pos = rng_below(T);
+    var pr1 = t_alloc(T); var pr0 = t_alloc(T);
+    var r1 = t_alloc(C); var r0 = t_alloc(C);
+    ru_attn_core_fwd_row(Q + pos * C * 8, K, Vv, pr1, r1, pos, C, nh, nkv);
+    _ref051_attn_core_fwd_row(Q + pos * C * 8, K, Vv, pr0, r0, pos, C, nh, nkv);
+    fz_check(bits_diff(r1, r0, C) == 0, round, "P3 ru_attn_core_fwd_row != the 0.5.1 row core");
+    return 0;
+}
+
+# P5: one malformed field / token / position per round; nothing may be written
+fn fz_reject(round): i64 {
+    var cfg = fz_cfg();
+    var V = _cfg_V(cfg);
+    var T = _cfg_T(cfg);
+    var np = ru_params_count(cfg);
+    var params = t_alloc(np);
+    fill_det(params, np, round);
+    var tok = fz_tokens(cfg);
+    var nkv = ru_decode_kv_count(cfg);
+    var kv = t_alloc(nkv + 16);
+    var lg = t_alloc(T * V);
+    var row = t_alloc(V);
+    fill_sentinel(kv, nkv + 16);
+    fill_sentinel(lg, T * V);
+    fill_sentinel(row, V);
+    var kind = rng_below(4);
+    if (kind == 0) {
+        # break one config field (V C T nh nkv NL F bias) in a copy
+        var bad = t_alloc(8);
+        t_copy(bad, cfg, 8);
+        var f = rng_below(8);
+        var v = 0 - rng_below(3);                         # 0, -1 or -2
+        if (f == 1) { v = _cfg_C(cfg) * 2 + 1; if (_cfg_nh(cfg) == 1) { v = 0; } }  # C % nh != 0 (or 0)
+        if (f == 4) { v = _cfg_nh(cfg) + 1; }             # nkv > nh
+        if (f == 5) { v = -1 - rng_below(3); }            # NL < 0
+        if (f == 7) { v = 2 + rng_below(5); }             # attn_bias not 0/1
+        store64(bad + f * 8, v);
+        fz_check(ru_cfg_check(bad) == RU_ERR_CFG(), round, "P5 malformed cfg accepted");
+        fz_check(ru_model_fwd(bad, params, tok, lg, 0) == RU_ERR_CFG(), round, "P5 ru_model_fwd ran a malformed cfg");
+        fz_check(ru_model_fwd_row(bad, params, 0, 0, kv, row) == RU_ERR_CFG(), round,
+          "P5 ru_model_fwd_row ran a malformed cfg");
+    }
+    if (kind == 1) {
+        var t = rng_below(T);
+        var b = V + rng_below(1000);
+        if (rng_below(2) == 0) { b = -1 - rng_below(1000); }
+        store64(tok + t * 8, b);
+        fz_check(ru_model_fwd(cfg, params, tok, lg, 0) == RU_ERR_TOKEN(), round, "P5 bad token accepted (batch)");
+        fz_check(ru_model_fwd_row(cfg, params, b, 0, kv, row) == RU_ERR_TOKEN(), round,
+          "P5 bad token accepted (decode)");
+    }
+    if (kind >= 2) {
+        var p = T + rng_below(100);
+        if (kind == 3) { p = -1 - rng_below(100); }
+        fz_check(ru_model_fwd_row(cfg, params, 0, p, kv, row) == RU_ERR_POS(), round, "P5 bad position accepted");
+    }
+    fz_check(sentinel_intact(kv, nkv + 16) + sentinel_intact(lg, T * V) + sentinel_intact(row, V) == 3, round,
+      "P5 a rejected call wrote an output");
+    return 0;
+}
+
+# every round runs P1-P5; the exit code is 1 when any property failed
+fn main(): i64 {
+    alloc_init();
+    var seed = 0x5EED00000502;
+    rng_seed64(seed);
+    var rounds = 20000;
+    var r = 0;
+    while (r < rounds) {
+        alloc_reset();                               # nothing outlives a round: rewind the bump heap
+        fz_model(r);
+        fz_core(r);
+        fz_reject(r);
+        r = r + 1;
+    }
+    _say("rupantara fuzz: ");
+    fmt_int(rounds);
+    _say(" rounds x 5 properties, seed 0x5EED00000502, failures: ");
+    fmt_int(_fz_fail);
+    _say(_nl);
+    if (_fz_fail != 0) { return 1; }
+    return 0;
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

@@ -27,9 +27,13 @@
 #   Kc Vc    : T*Ckv each
 #   Pc       : nh*T*T   (attention probabilities, causal-masked)
 #   concat   : T*C      (pre-Wo head concatenation)
+# Returns the element count, or RU_ERR_CFG() (-1) for a shape the kernels cannot index
+# (a dim < 1, C % nh != 0, nh % nkv != 0) or one whose arena would pass
+# _RU_MAX_ELEMS() — so t_alloc refuses it loudly instead of a wrapped size coming back
+# small (it divided by zero at nh = 0 and wrapped silently through 0.5.1).
 fn ru_attn_arena_size(T, C, nh, nkv): i64 {
-    var Ckv = nkv * (C / nh);
-    return 2 * T * C + 2 * T * Ckv + nh * T * T;
+    if (_ru_attn_dims_ok(T, C, nh, nkv) == 0) { return RU_ERR_CFG(); }
+    return _ru_arena_c(T, C, nh, nkv);
 }
 
 # arena sub-pointers (deterministic given dims; Ckv = nkv * (C/nh)) — identical to
@@ -41,18 +45,95 @@ fn _ru_at_Vc(ar, T, C, Ckv): i64 { return ar + (T * C + T * Ckv) * 8; }
 fn _ru_at_Pc(ar, T, C, Ckv): i64 { return ar + (T * C + 2 * T * Ckv) * 8; }
 fn _ru_at_concat(ar, T, C, nh, Ckv): i64 { return ar + (T * C + 2 * T * Ckv + nh * T * T) * 8; }
 
+# ---- one (query head, query position) pair: THE per-head arithmetic -----------
+# The single source of truth for both attention cores (the batch ru_attn_core_fwd
+# below and the cached-decode ru_attn_core_fwd_row in decode.cyr), so cached decode is
+# bit-identical to the batch forward by construction, not by two copies kept in step
+# (through 0.5.1 they were two ~45-line copies).
+#   qbase : this query head's hd-block of its Q row
+#   Kc/Vc : (>= jhi+1, Ckv) key / value rows; kvb = this head's shared K/V head offset
+#   prow  : jhi+1 f64 out — the softmax probabilities over keys 0..jhi
+#   cbase : hd f64 out — sum_j prow[j] * V[j, kvb..kvb+hd)
+# Scores: a 4-lane f64v_fmadd dot over the head dim, the lanes tree-reduced, then the
+# 0..3-element scalar tail; times scale = 1/sqrt(hd). Softmax: max-subtracted exp,
+# one division, scaled. PV: one f64v_axpy per key over the 4-aligned body (0.5.2),
+# then the same scalar tail. The axpy replaced a broadcast-buffer fill plus one
+# f64v_fmadd per 4 elements: each element still gets round(round(p*v) + acc) in
+# ascending-j order (mulpd + addpd on x86_64; FMLA on aarch64, where f64v_fmadd also
+# fuses), and the vector/scalar split stays at hd4 — rosnet ADR 0002's rule, the same
+# change rosnet 1.2.2 made to linear_fwd. Bit-identical to 0.5.1 (tests/tcyr/reference.tcyr).
+fn _ru_attn_qrow(qbase, Kc, Vc, prow, cbase, jhi, Ckv, kvb, hd, scale): i64 {
+    var hd4 = hd - (hd % 4);        # head dim is contiguous -> 4-wide vector body
+    var acc[32];                    # 4-lane dot accumulator (fn-local: 32 bytes = 4 f64)
+    # raw scores for keys j = 0..jhi
+    var j = 0;
+    while (j <= jhi) {
+        var kbase = Kc + (j * Ckv + kvb) * 8;
+        store64(&acc, f64_from(0)); store64(&acc + 8, f64_from(0));
+        store64(&acc + 16, f64_from(0)); store64(&acc + 24, f64_from(0));
+        var d = 0;
+        while (d < hd4) {
+            f64v_fmadd(&acc, qbase + d * 8, kbase + d * 8, &acc, 4);
+            d = d + 4;
+        }
+        var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
+          f64_add(load64(&acc + 16), load64(&acc + 24)));
+        while (d < hd) {
+            dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
+            d = d + 1;
+        }
+        store64(prow + j * 8, f64_mul(dot, scale));
+        j = j + 1;
+    }
+    # softmax over j = 0..jhi
+    var mx = load64(prow);
+    j = 1;
+    while (j <= jhi) {
+        var s = load64(prow + j * 8);
+        if (f64_gt(s, mx) == 1) { mx = s; }
+        j = j + 1;
+    }
+    var sum = f64_from(0);
+    j = 0;
+    while (j <= jhi) {
+        var e = f64_exp(f64_sub(load64(prow + j * 8), mx));
+        store64(prow + j * 8, e);
+        sum = f64_add(sum, e);
+        j = j + 1;
+    }
+    var inv = f64_div(f64_from(1), sum);
+    j = 0;
+    while (j <= jhi) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
+    # cbase[d] = sum_j P[j] * V[j, kvb+d]: an axpy over the contiguous head dim per key
+    var dz = 0;
+    while (dz < hd) { store64(cbase + dz * 8, f64_from(0)); dz = dz + 1; }
+    j = 0;
+    while (j <= jhi) {
+        var pij = load64(prow + j * 8);
+        var vbase = Vc + (j * Ckv + kvb) * 8;
+        f64v_axpy(cbase, vbase, pij, hd4);       # hd4 is a multiple of 4: no tail past cbase
+        var d = hd4;
+        while (d < hd) {
+            store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
+                f64_mul(pij, load64(vbase + d * 8))));
+            d = d + 1;
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+
 # ---- shared attention core (post-projection) --------------------------------
 # Given Qc(T,C), Kc(T,Ckv), Vc(T,Ckv) it fills Pc(nh,T,T) and concat(T,C): causal
 # scaled-dot-product, each query head h attending its shared K/V head
-# kvb = (h/gsz)*hd. ONE source of truth for the per-head softmax/PV arithmetic.
+# kvb = (h/gsz)*hd, query i attending keys 0..i. The per-pair arithmetic is
+# _ru_attn_qrow above. A leaf kernel: dims are trusted (C % nh == 0 and nh % nkv == 0
+# are the caller's — the model entries check them; see src/guard.cyr).
 fn ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
     var hd = C / nh;
     var Ckv = nkv * hd;
     var gsz = nh / nkv;             # query heads per K/V head (GQA group size)
-    var hd4 = hd - (hd % 4);        # head dim is contiguous -> 4-wide vector body
     var scale = f64_div(f64_from(1), f64_sqrt(f64_from(hd)));
-    var acc[32];                    # 4-lane dot accumulator
-    var pv[32];                     # 4-lane broadcast buffer
 
     # zero the full probability buffer (upper triangle stays 0)
     t_zero(Pc, nh * T * T);
@@ -63,72 +144,8 @@ fn ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
         var kvb = (h / gsz) * hd;   # its shared K/V head's block in Kc/Vc
         var i = 0;
         while (i < T) {
-            var prow = Pc + (h * T + i) * T * 8;
-            # CAUSAL: query i attends keys j = 0..i.
-            var jhi = i;
-            # raw scores for j = 0..jhi
-            var qbase = Qc + (i * C + base) * 8;
-            var j = 0;
-            while (j <= jhi) {
-                var kbase = Kc + (j * Ckv + kvb) * 8;
-                store64(&acc, f64_from(0)); store64(&acc + 8, f64_from(0));
-                store64(&acc + 16, f64_from(0)); store64(&acc + 24, f64_from(0));
-                var d = 0;
-                while (d < hd4) {
-                    f64v_fmadd(&acc, qbase + d * 8, kbase + d * 8, &acc, 4);
-                    d = d + 4;
-                }
-                var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
-                  f64_add(load64(&acc + 16), load64(&acc + 24)));
-                while (d < hd) {
-                    dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
-                    d = d + 1;
-                }
-                store64(prow + j * 8, f64_mul(dot, scale));
-                j = j + 1;
-            }
-            # softmax over j = 0..jhi
-            var mx = load64(prow);
-            j = 1;
-            while (j <= jhi) {
-                var s = load64(prow + j * 8);
-                if (f64_gt(s, mx) == 1) { mx = s; }
-                j = j + 1;
-            }
-            var sum = f64_from(0);
-            j = 0;
-            while (j <= jhi) {
-                var e = f64_exp(f64_sub(load64(prow + j * 8), mx));
-                store64(prow + j * 8, e);
-                sum = f64_add(sum, e);
-                j = j + 1;
-            }
-            var inv = f64_div(f64_from(1), sum);
-            j = 0;
-            while (j <= jhi) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
-            # concat[i, base+d] = sum_j P[i,j] * V[j, kvb+d]  (axpy over the
-            # contiguous head dim d, broadcasting the scalar P[i,j] over j)
-            var cbase = concat + (i * C + base) * 8;
-            var dz = 0;
-            while (dz < hd) { store64(cbase + dz * 8, f64_from(0)); dz = dz + 1; }
-            j = 0;
-            while (j <= jhi) {
-                var pij = load64(prow + j * 8);
-                store64(&pv, pij); store64(&pv + 8, pij);
-                store64(&pv + 16, pij); store64(&pv + 24, pij);
-                var vbase = Vc + (j * Ckv + kvb) * 8;
-                var d = 0;
-                while (d < hd4) {
-                    f64v_fmadd(cbase + d * 8, &pv, vbase + d * 8, cbase + d * 8, 4);
-                    d = d + 4;
-                }
-                while (d < hd) {
-                    store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
-                        f64_mul(pij, load64(vbase + d * 8))));
-                    d = d + 1;
-                }
-                j = j + 1;
-            }
+            _ru_attn_qrow(Qc + (i * C + base) * 8, Kc, Vc, Pc + (h * T + i) * T * 8,
+              concat + (i * C + base) * 8, i, Ckv, kvb, hd, scale);
             i = i + 1;
         }
         h = h + 1;
@@ -139,10 +156,15 @@ fn ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
 # ---- forward (MHA / GQA) ----------------------------------------------------
 # x(T,C) -> out(T,C). Projects Q/K/V, runs the shared core, applies Wo. Bias
 # pointers bq/bk/bv/bo may be 0. pos_kind is carried for signature parity with
-# attn11; M1 supports 0 (learned-absolute) only — RoPE (1) is a later increment.
+# attn11; only 0 (learned-absolute) is implemented — RoPE (1) is a later increment.
 # rupantara uses rosnet's linear_fwd directly (attn11's qlinear_fwd is a pure
 # passthrough to it off the ternary path, so this is bit-identical).
+# Returns 0, RU_ERR_ARG() for pos_kind != 0 (through 0.5.1 a RoPE request silently ran
+# learned-absolute attention), or RU_ERR_CFG() for a shape the core cannot index —
+# both before anything is written. ar must hold ru_attn_arena_size(T, C, nh, nkv) f64.
 fn ru_attn_fwd(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x, out, ar, T, C, nh, nkv, pos_kind): i64 {
+    if (pos_kind != 0) { return RU_ERR_ARG(); }
+    if (_ru_attn_dims_ok(T, C, nh, nkv) == 0) { return RU_ERR_CFG(); }
     var Ckv = nkv * (C / nh);
     var Qc = _ru_at_Qc(ar);
     var Kc = _ru_at_Kc(ar, T, C);

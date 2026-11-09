@@ -27,6 +27,7 @@ var lw[256];       # Wfc  : K x N = 8 x 32  f64
 var lyc[256];      # y_cpu: M x N = 8 x 32  f64  (rosnet linear_fwd reference)
 var lyg[256];      # y_gpu: M x N = 8 x 32  f64  (linear_fwd_gpu via #83)
 
+# fills x and Wfc with fractional values (products not exactly representable)
 fn fill_data(): i64 {
     var i = 0;
     while (i < 64) {
@@ -41,6 +42,7 @@ fn fill_data(): i64 {
     return 0;
 }
 
+# runs both paths, byte-compares, and maps the outcome to the exit-code oracle above
 fn gpulayer_main(): i64 {
     alloc_init();
     fill_data();

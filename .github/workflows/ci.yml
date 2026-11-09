@@ -11,14 +11,27 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token. Nothing here writes to the repository, and when release.yml calls
+# this workflow the called side can only lower the caller's permissions, so the CI
+# gate never holds the release job's contents: write (0.5.2; it inherited it before).
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned to a full commit SHA (a tag can be moved); the
+      # comment names the release the SHA was resolved from (git ls-remote, 2026-11-09).
+      # persist-credentials: false keeps the token out of .git/config, where the
+      # curl | sh installer below could read it.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
+        # The version is the cyrius.cyml pin — the single source of truth.
         run: |
           set -e
           CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
@@ -28,21 +41,24 @@ jobs:
           echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
 
       - name: Resolve dependencies
-        # Reads [deps] from cyrius.cyml. M0 is stdlib-only; M1 adds rosnet
-        # (fetched via [deps.rosnet] git+tag). lib/ must be a real dir.
+        # Reads [deps] from cyrius.cyml: the stdlib leaves, and rosnet (git + tag), which
+        # brings tyche in transitively. lib/ must be a real dir.
         run: |
           rm -rf lib
           mkdir lib
           cyrius deps
 
       - name: Lint
+        # Hard gate over every Cyrius source: the library, programs, suites, the shared
+        # test helpers / oracles, the benchmark and the fuzz harness (0.5.2 widened it
+        # from src/, programs/ and the suites).
         run: |
           fail=0
-          for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr; do
+          for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr tests/*.cyr tests/*.bcyr tests/*.fcyr; do
             [ -e "$f" ] || continue
             out=$(cyrius lint "$f" 2>&1 || true)
             echo "$out"
-            if echo "$out" | grep -qE '^[[:space:]]*warn '; then
+            if echo "$out" | grep -qE '^[[:space:]]*(warn|error) '; then
               echo "lint: warnings in $f"; fail=1
             fi
           done
@@ -51,7 +67,7 @@ jobs:
       - name: Format check
         run: |
           fail=0
-          for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr; do
+          for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr tests/*.cyr tests/*.bcyr tests/*.fcyr; do
             [ -e "$f" ] || continue
             if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"; fail=1
@@ -59,18 +75,24 @@ jobs:
           done
           [ $fail -eq 0 ] || { echo "fmt: drift detected"; exit 1; }
 
+      - name: Doc check
+        # Every public fn in src/ carries a doc comment (cyrdoc exits 1 otherwise).
+        run: cyrius doc --check src/*.cyr
+
       - name: Vet
         run: cyrius vet programs/smoke.cyr
 
-      - name: Verify dist bundle is in sync with src/
+      - name: Verify dist/ is in sync with src/
+        # Consumers import dist/rupantara.cyr and `cyrius deps` reads its .deps sidecar:
+        # both must match the commit. distlib is byte-deterministic, so a diff after
+        # regenerating is a valid gate (0.5.2: the sidecar was not checked before).
         run: |
           cyrius distlib
-          if ! git diff --quiet dist/rupantara.cyr; then
-            echo "ERROR: dist/rupantara.cyr is stale. Run 'cyrius distlib' and commit."
-            git --no-pager diff dist/rupantara.cyr | head -40
+          if ! git diff --exit-code dist/ || [ -n "$(git status --porcelain dist/)" ]; then
+            echo "ERROR: dist/ is stale. Run 'cyrius distlib' and commit."
             exit 1
           fi
-          echo "dist/rupantara.cyr matches src/"
+          echo "dist/ matches src/"
 
       - name: Build (link-check, DCE on)
         run: |
@@ -81,15 +103,36 @@ jobs:
       - name: Verify ELF
         run: xxd -l 4 build/rupantara_smoke | grep -q "7f45 4c46"
 
+      - name: Run smoke
+        run: ./build/rupantara_smoke
+
+      - name: Build the GPU crown program
+        # programs/gpulayer.cyr is the AGNOS #83 proof; on Linux it is compile-checked
+        # here (no device), its tiling is pinned by tests/tcyr/gpu.tcyr.
+        run: cyrius build programs/gpulayer.cyr build/gpulayer
+
       - name: Test (CPU-only suites)
         run: |
           for f in tests/tcyr/*.tcyr; do cyrius test "$f" || exit 1; done
+
+      - name: Fuzz
+        # Seeded property fuzzing (tests/rupantara.fcyr): 20,000 rounds of random configs
+        # and inputs against the oracles in tests/reference.cyr. Exit 1 = a property failed.
+        run: |
+          CYRIUS_DCE=1 cyrius build tests/rupantara.fcyr build/rupantara-fuzz
+          timeout 120 ./build/rupantara-fuzz || { echo "FUZZ: property failure, crash or timeout"; exit 1; }
+
+      - name: Benchmarks
+        # Informational (CI hosts are noisy); scripts/bench-history.sh records numbers.
+        run: CYRIUS_DCE=1 cyrius bench tests/rupantara.bcyr
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Scan for dangerous patterns
         run: |
           FAIL=0
@@ -113,14 +156,16 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Check required files
         run: |
           MISSING=0
-          for f in README.md CHANGELOG.md VERSION cyrius.cyml; do
+          for f in README.md CHANGELOG.md VERSION cyrius.cyml LICENSE SECURITY.md dist/rupantara.cyr; do
             if [ -f "$f" ]; then echo "  OK: $f"; else echo "  MISSING: $f"; MISSING=1; fi
           done
-          for f in CONTRIBUTING.md SECURITY.md LICENSE; do
+          for f in CONTRIBUTING.md; do
             if [ -f "$f" ]; then echo "  OK: $f"; else echo "  WARN (optional): $f"; fi
           done
           exit $MISSING

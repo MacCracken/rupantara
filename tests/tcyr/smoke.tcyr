@@ -1,12 +1,15 @@
-# tests/tcyr/smoke.tcyr — rupantara scaffold smoke (M0).
+# tests/tcyr/smoke.tcyr — rupantara scaffold smoke (M0): the library links and the
+# version probe matches VERSION (CI's docs job checks the same pair).
 include "src/lib.cyr"
 include "lib/assert.cyr"
 
+# rupantara_version() packs VERSION as major*10000 + minor*100 + patch
 fn test_version() {
-    assert_eq(rupantara_version(), 501, "version 0.5.1 packs to 501");
+    assert_eq(rupantara_version(), 502, "version 0.5.2 packs to 502");
     return 0;
 }
 
+# runs the suite; the exit code is the failure count
 fn main(): i64 {
     alloc_init();
     test_version();
@@ -14,4 +17,4 @@ fn main(): i64 {
 }
 
 var rc = main();
-syscall(60, rc);
+syscall(SYS_EXIT, rc);

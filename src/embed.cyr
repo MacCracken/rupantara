@@ -8,18 +8,30 @@
 #
 # tokens: n integer ids. tok_emb: (V,C). pos_emb: (T,C). x0: (n,C) output (the
 # residual stream at layer 0). n <= T (eval windows may be shorter than context).
+# A leaf kernel: token ids are trusted (each must be in [0, V) — ru_model_fwd checks).
 fn ru_embed_fwd(tokens, tok_emb, pos_emb, x0, n, C): i64 {
     var t = 0;
     while (t < n) {
         var tok = load64(tokens + t * 8);
-        var c = 0;
-        while (c < C) {
-            var e = load64(tok_emb + (tok * C + c) * 8);
-            e = f64_add(e, load64(pos_emb + (t * C + c) * 8));
-            store64(x0 + (t * C + c) * 8, e);
-            c = c + 1;
-        }
+        _ru_add_rows(x0 + t * C * 8, tok_emb + tok * C * 8, pos_emb + t * C * 8, C);
         t = t + 1;
+    }
+    return 0;
+}
+
+# dst[i] = a[i] + b[i] for i < n — the embedding sum and every residual add in the
+# block and decode paths. f64v_add over the even prefix (the builtins write whole
+# 2-lane pairs and have no scalar tail, so the count passed must be even), then the
+# odd last element alone. One rounding per element on every target, in the same
+# operand order as the scalar loops it replaced (0.5.2), so the bits are unchanged.
+# dst may alias a or b.
+fn _ru_add_rows(dst, a, b, n): i64 {
+    var n2 = n - (n % 2);
+    f64v_add(dst, a, b, n2);
+    var i = n2;
+    while (i < n) {
+        store64(dst + i * 8, f64_add(load64(a + i * 8), load64(b + i * 8)));
+        i = i + 1;
     }
     return 0;
 }

@@ -1,0 +1,391 @@
+# tests/reference.cyr — oracles for the bit-identity and correctness suites.
+#
+# 1. The 0.5.1 attention cores, VERBATIM (git show 2467829:src/attn.cyr / src/decode.cyr,
+#    renamed _ref051_*). 0.5.2 moved both cores onto one shared routine and its PV
+#    accumulation from a broadcast-buffer f64v_fmadd per 4 elements to one f64v_axpy
+#    per key; tests/tcyr/reference.tcyr and the fuzz harness hold the new cores to
+#    these loops bit for bit. Do not "fix" or tidy them: they are the record.
+# 2. _ref_add_rows: the scalar residual / embedding loop _ru_add_rows replaced.
+# 3. _naive_model_fwd: an independent plain-loop forward written from the packed
+#    layout documented in src/blocks.cyr — sequential sums, an explicit GQA head map,
+#    none of rupantara's offset helpers — compared within a tolerance (its sums run in
+#    a different order). It checks the layout and the head mapping, which the
+#    bit-identity checks above cannot: they compare rupantara with itself.
+# Included after src/lib.cyr and tests/common.cyr. Not a suite.
+
+fn _ref051_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
+    var hd = C / nh;
+    var Ckv = nkv * hd;
+    var gsz = nh / nkv;             # query heads per K/V head (GQA group size)
+    var hd4 = hd - (hd % 4);        # head dim is contiguous -> 4-wide vector body
+    var scale = f64_div(f64_from(1), f64_sqrt(f64_from(hd)));
+    var acc[32];                    # 4-lane dot accumulator
+    var pv[32];                     # 4-lane broadcast buffer
+
+    # zero the full probability buffer (upper triangle stays 0)
+    t_zero(Pc, nh * T * T);
+
+    var h = 0;
+    while (h < nh) {
+        var base = h * hd;          # this query head's block in Q/concat
+        var kvb = (h / gsz) * hd;   # its shared K/V head's block in Kc/Vc
+        var i = 0;
+        while (i < T) {
+            var prow = Pc + (h * T + i) * T * 8;
+            # CAUSAL: query i attends keys j = 0..i.
+            var jhi = i;
+            # raw scores for j = 0..jhi
+            var qbase = Qc + (i * C + base) * 8;
+            var j = 0;
+            while (j <= jhi) {
+                var kbase = Kc + (j * Ckv + kvb) * 8;
+                store64(&acc, f64_from(0)); store64(&acc + 8, f64_from(0));
+                store64(&acc + 16, f64_from(0)); store64(&acc + 24, f64_from(0));
+                var d = 0;
+                while (d < hd4) {
+                    f64v_fmadd(&acc, qbase + d * 8, kbase + d * 8, &acc, 4);
+                    d = d + 4;
+                }
+                var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
+                  f64_add(load64(&acc + 16), load64(&acc + 24)));
+                while (d < hd) {
+                    dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
+                    d = d + 1;
+                }
+                store64(prow + j * 8, f64_mul(dot, scale));
+                j = j + 1;
+            }
+            # softmax over j = 0..jhi
+            var mx = load64(prow);
+            j = 1;
+            while (j <= jhi) {
+                var s = load64(prow + j * 8);
+                if (f64_gt(s, mx) == 1) { mx = s; }
+                j = j + 1;
+            }
+            var sum = f64_from(0);
+            j = 0;
+            while (j <= jhi) {
+                var e = f64_exp(f64_sub(load64(prow + j * 8), mx));
+                store64(prow + j * 8, e);
+                sum = f64_add(sum, e);
+                j = j + 1;
+            }
+            var inv = f64_div(f64_from(1), sum);
+            j = 0;
+            while (j <= jhi) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
+            # concat[i, base+d] = sum_j P[i,j] * V[j, kvb+d]  (axpy over the
+            # contiguous head dim d, broadcasting the scalar P[i,j] over j)
+            var cbase = concat + (i * C + base) * 8;
+            var dz = 0;
+            while (dz < hd) { store64(cbase + dz * 8, f64_from(0)); dz = dz + 1; }
+            j = 0;
+            while (j <= jhi) {
+                var pij = load64(prow + j * 8);
+                store64(&pv, pij); store64(&pv + 8, pij);
+                store64(&pv + 16, pij); store64(&pv + 24, pij);
+                var vbase = Vc + (j * Ckv + kvb) * 8;
+                var d = 0;
+                while (d < hd4) {
+                    f64v_fmadd(cbase + d * 8, &pv, vbase + d * 8, cbase + d * 8, 4);
+                    d = d + 4;
+                }
+                while (d < hd) {
+                    store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
+                        f64_mul(pij, load64(vbase + d * 8))));
+                    d = d + 1;
+                }
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        h = h + 1;
+    }
+    return 0;
+}
+
+fn _ref051_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv): i64 {
+    var hd = C / nh;
+    var Ckv = nkv * hd;
+    var gsz = nh / nkv;
+    var hd4 = hd - (hd % 4);
+    var scale = f64_div(f64_from(1), f64_sqrt(f64_from(hd)));
+    var acc[32];                    # 4-lane dot accumulator (32 bytes = 4 f64)
+    var pv[32];                     # 4-lane broadcast buffer
+    var h = 0;
+    while (h < nh) {
+        var base = h * hd;          # this query head's block in q_row/concat_row
+        var kvb = (h / gsz) * hd;   # its shared K/V head's block in Kc/Vc
+        var qbase = q_row + base * 8;
+        var j = 0;
+        while (j <= pos) {
+            var kbase = Kc + (j * Ckv + kvb) * 8;
+            store64(&acc, f64_from(0)); store64(&acc + 8, f64_from(0));
+            store64(&acc + 16, f64_from(0)); store64(&acc + 24, f64_from(0));
+            var d = 0;
+            while (d < hd4) {
+                f64v_fmadd(&acc, qbase + d * 8, kbase + d * 8, &acc, 4);
+                d = d + 4;
+            }
+            var dot = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
+              f64_add(load64(&acc + 16), load64(&acc + 24)));
+            while (d < hd) {
+                dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
+                d = d + 1;
+            }
+            store64(prow + j * 8, f64_mul(dot, scale));
+            j = j + 1;
+        }
+        var mx = load64(prow);
+        j = 1;
+        while (j <= pos) {
+            var s = load64(prow + j * 8);
+            if (f64_gt(s, mx) == 1) { mx = s; }
+            j = j + 1;
+        }
+        var sum = f64_from(0);
+        j = 0;
+        while (j <= pos) {
+            var e = f64_exp(f64_sub(load64(prow + j * 8), mx));
+            store64(prow + j * 8, e);
+            sum = f64_add(sum, e);
+            j = j + 1;
+        }
+        var inv = f64_div(f64_from(1), sum);
+        j = 0;
+        while (j <= pos) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
+        var cbase = concat_row + base * 8;
+        var dz = 0;
+        while (dz < hd) { store64(cbase + dz * 8, f64_from(0)); dz = dz + 1; }
+        j = 0;
+        while (j <= pos) {
+            var pij = load64(prow + j * 8);
+            store64(&pv, pij); store64(&pv + 8, pij);
+            store64(&pv + 16, pij); store64(&pv + 24, pij);
+            var vbase = Vc + (j * Ckv + kvb) * 8;
+            var d = 0;
+            while (d < hd4) {
+                f64v_fmadd(cbase + d * 8, &pv, vbase + d * 8, cbase + d * 8, 4);
+                d = d + 4;
+            }
+            while (d < hd) {
+                store64(cbase + d * 8, f64_add(load64(cbase + d * 8),
+                    f64_mul(pij, load64(vbase + d * 8))));
+                d = d + 1;
+            }
+            j = j + 1;
+        }
+        h = h + 1;
+    }
+    return 0;
+}
+
+# The 0.5.1 residual / embedding loop: dst[i] = a[i] + b[i], scalar, index order.
+fn _ref_add_rows(dst, a, b, n): i64 {
+    var i = 0;
+    while (i < n) {
+        store64(dst + i * 8, f64_add(load64(a + i * 8), load64(b + i * 8)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# ---- the naive forward -------------------------------------------------------
+# y(M,N) = x(M,K) @ W(K,N) (+ b), W row-major, each output a sequential sum over k.
+fn _nv_lin(x, W, b, y, M, K, N): i64 {
+    var m = 0;
+    while (m < M) {
+        var n = 0;
+        while (n < N) {
+            var s = f64_from(0);
+            if (b != 0) { s = load64(b + n * 8); }
+            var k = 0;
+            while (k < K) {
+                s = f64_add(s, f64_mul(load64(x + (m * K + k) * 8), load64(W + (k * N + n) * 8)));
+                k = k + 1;
+            }
+            store64(y + (m * N + n) * 8, s);
+            n = n + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# LayerNorm per row, eps 1e-5, the mean and variance as sum / C (rupantara multiplies
+# by 1/C — a different rounding, inside the tolerance).
+fn _nv_ln(x, g, b, y, M, C): i64 {
+    var eps = f64_div(f64_from(1), f64_from(100000));
+    var m = 0;
+    while (m < M) {
+        var s = f64_from(0);
+        var i = 0;
+        while (i < C) { s = f64_add(s, load64(x + (m * C + i) * 8)); i = i + 1; }
+        var mu = f64_div(s, f64_from(C));
+        var v = f64_from(0);
+        i = 0;
+        while (i < C) {
+            var d = f64_sub(load64(x + (m * C + i) * 8), mu);
+            v = f64_add(v, f64_mul(d, d));
+            i = i + 1;
+        }
+        var sd = f64_sqrt(f64_add(f64_div(v, f64_from(C)), eps));
+        i = 0;
+        while (i < C) {
+            var xh = f64_div(f64_sub(load64(x + (m * C + i) * 8), mu), sd);
+            store64(y + (m * C + i) * 8, f64_add(f64_mul(xh, load64(g + i * 8)), load64(b + i * 8)));
+            i = i + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# GELU, tanh form: 0.5 x (1 + tanh(sqrt(2/pi) (x + 0.044715 x^3)))
+fn _nv_gelu(x, y, n): i64 {
+    var c = f64_sqrt(f64_div(f64_from(2), F64_PI));
+    var a = f64_div(f64_from(44715), f64_from(1000000));
+    var i = 0;
+    while (i < n) {
+        var v = load64(x + i * 8);
+        var inner = f64_mul(c, f64_add(v, f64_mul(a, f64_mul(v, f64_mul(v, v)))));
+        var half = f64_div(v, f64_from(2));
+        store64(y + i * 8, f64_mul(half, f64_add(f64_from(1), f64_tanh(inner))));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Causal attention over projected Q(T,C), K(T,Ckv), V(T,Ckv) -> out(T,C). Query head h
+# reads K/V head g = h / (nh / nkv): heads are grouped in order, nh / nkv per K/V head.
+fn _nv_attn(Q, K, Vv, out, T, C, nh, nkv): i64 {
+    var hd = C / nh;
+    var Ckv = nkv * hd;
+    var grp = nh / nkv;
+    var p = t_alloc(T);
+    var h = 0;
+    while (h < nh) {
+        var g = h / grp;
+        var i = 0;
+        while (i < T) {
+            var mx = f64_from(0);
+            var j = 0;
+            while (j <= i) {
+                var s = f64_from(0);
+                var d = 0;
+                while (d < hd) {
+                    var qv = load64(Q + (i * C + h * hd + d) * 8);
+                    s = f64_add(s, f64_mul(qv, load64(K + (j * Ckv + g * hd + d) * 8)));
+                    d = d + 1;
+                }
+                s = f64_div(s, f64_sqrt(f64_from(hd)));
+                store64(p + j * 8, s);
+                if (j == 0 || f64_gt(s, mx) == 1) { mx = s; }
+                j = j + 1;
+            }
+            var z = f64_from(0);
+            j = 0;
+            while (j <= i) {
+                var e = f64_exp(f64_sub(load64(p + j * 8), mx));
+                store64(p + j * 8, e);
+                z = f64_add(z, e);
+                j = j + 1;
+            }
+            var d2 = 0;
+            while (d2 < hd) {
+                var o = f64_from(0);
+                j = 0;
+                while (j <= i) {
+                    o = f64_add(o, f64_mul(f64_div(load64(p + j * 8), z), load64(Vv + (j * Ckv + g * hd + d2) * 8)));
+                    j = j + 1;
+                }
+                store64(out + (i * C + h * hd + d2) * 8, o);
+                d2 = d2 + 1;
+            }
+            i = i + 1;
+        }
+        h = h + 1;
+    }
+    return 0;
+}
+
+# The whole forward: tokens(T) -> logits(T,V), from the documented packed layout.
+fn _naive_model_fwd(V, C, T, nh, nkv, NL, F, bias, params, tokens, logits): i64 {
+    var Ckv = nkv * (C / nh);
+    var blk = 4 * C + 2 * C * C + 2 * C * Ckv + 2 * C * F + F + C;
+    if (bias == 1) { blk = blk + 2 * C + 2 * Ckv; }
+    var base_sz = 4 * C + 2 * C * C + 2 * C * Ckv + 2 * C * F + F + C;
+    var x = t_alloc(T * C);
+    var a = t_alloc(T * C);
+    var Q = t_alloc(T * C);
+    var K = t_alloc(T * Ckv);
+    var Vv = t_alloc(T * Ckv);
+    var at = t_alloc(T * C);
+    var o = t_alloc(T * C);
+    var fc = t_alloc(T * F);
+    var gg = t_alloc(T * F);
+    var t = 0;
+    while (t < T) {
+        var tok = load64(tokens + t * 8);
+        var c = 0;
+        while (c < C) {
+            store64(x + (t * C + c) * 8, f64_add(load64(params + (tok * C + c) * 8),
+                load64(params + (V * C + t * C + c) * 8)));
+            c = c + 1;
+        }
+        t = t + 1;
+    }
+    var L = 0;
+    while (L < NL) {
+        var pb = params + (V * C + T * C + L * blk) * 8;   # this block
+        var W = pb + 2 * C * 8;                            # Wq
+        var Wk = W + C * C * 8;
+        var Wv = Wk + C * Ckv * 8;
+        var Wo = Wv + C * Ckv * 8;
+        var ln2 = Wo + C * C * 8;
+        var Wfc = ln2 + 2 * C * 8;
+        var bfc = Wfc + C * F * 8;
+        var Wp = bfc + F * 8;
+        var bp = Wp + F * C * 8;
+        var bq = 0; var bk = 0; var bv = 0; var bo = 0;
+        if (bias == 1) {
+            bq = pb + base_sz * 8;
+            bk = bq + C * 8;
+            bv = bk + Ckv * 8;
+            bo = bv + Ckv * 8;
+        }
+        _nv_ln(x, pb, pb + C * 8, a, T, C);
+        _nv_lin(a, W, bq, Q, T, C, C);
+        _nv_lin(a, Wk, bk, K, T, C, Ckv);
+        _nv_lin(a, Wv, bv, Vv, T, C, Ckv);
+        _nv_attn(Q, K, Vv, at, T, C, nh, nkv);
+        _nv_lin(at, Wo, bo, o, T, C, C);
+        var i = 0;
+        while (i < T * C) { store64(x + i * 8, f64_add(load64(x + i * 8), load64(o + i * 8))); i = i + 1; }
+        _nv_ln(x, ln2, ln2 + C * 8, a, T, C);
+        _nv_lin(a, Wfc, bfc, fc, T, C, F);
+        _nv_gelu(fc, gg, T * F);
+        _nv_lin(gg, Wp, bp, o, T, F, C);
+        i = 0;
+        while (i < T * C) { store64(x + i * 8, f64_add(load64(x + i * 8), load64(o + i * 8))); i = i + 1; }
+        L = L + 1;
+    }
+    var lnf = params + (V * C + T * C + NL * blk) * 8;
+    _nv_ln(x, lnf, lnf + C * 8, a, T, C);
+    t = 0;
+    while (t < T) {
+        var v = 0;
+        while (v < V) {
+            var s = f64_from(0);
+            var c2 = 0;
+            while (c2 < C) {
+                s = f64_add(s, f64_mul(load64(a + (t * C + c2) * 8), load64(params + (v * C + c2) * 8)));
+                c2 = c2 + 1;
+            }
+            store64(logits + (t * V + v) * 8, s);
+            v = v + 1;
+        }
+        t = t + 1;
+    }
+    return 0;
+}

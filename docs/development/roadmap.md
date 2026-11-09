@@ -96,14 +96,35 @@ anukūlana's fidelity gate can lean on `ru_model_fwd`.
   — e.g. when importing a Llama-class model requires them. Each ported from attn11
   + parity-tested. Don't build all up front.
 
-### M4 — hardening + fuzz + bench
+### M4 — hardening + fuzz + bench (mostly done in 0.5.2)
 - Validate model-config shape (dims/layers/heads) against buffer/tensor sizes;
   reject malformed configs. Fuzz the config/forward entry. Bench forward
   throughput (tokens/s) → `docs/benchmarks.md`.
+- **Done in 0.5.2** (P(-1) sweep, `docs/audit/2026-11-09-audit.md`):
+  - `ru_cfg_check` and the `RU_ERR_*` contract (`docs/api.md`, ADR 0003);
+  - overflow-checked sizing;
+  - the fuzz harness (`tests/rupantara.fcyr`, 20,000 rounds × 5 properties);
+  - benchmarks (`tests/rupantara.bcyr`, `docs/benchmarks.md`,
+    `scripts/bench-history.sh`).
+- **Open:** tokens/s at GPT-2-small scale (needs real weights through
+  anukūlana).
 
-### M5 — security audit + SECURITY.md
+### M5 — security audit + SECURITY.md (covered by the 0.5.2 audit)
 - 6-dimension audit (memory safety · integer overflow · shape/bounds on untrusted
   configs · resource caps · fail-loud). Report + `SECURITY.md`.
+- The 0.5.2 audit covered all six dimensions and fixed what it found, including
+  the decode heap overflow and decode heap growth. `SECURITY.md` states the
+  trust model. Re-audit before v1.0 if M3 adds surface.
+
+### Follow-ons (tracked; not scheduled)
+- **A GPU path for `linear_fwd_gpu` at K > 8 or with a bias.** Today those
+  shapes hand the whole problem to the CPU, which is bit-exact. A GPU path
+  needs cross-tile accumulation in `linear_fwd`'s order, to stay bit-exact
+  (ADR 0002).
+- **A variable-length batch forward** (`n < T` tokens without padding). Today
+  callers pad the window, which is exact because attention is causal.
+- **anukūlana's decode loop onto `ru_model_fwd_row_s`.** It allocates per token
+  today. This is a cross-repo change.
 
 ### v1.0 — freeze & clean cut
 - `docs/api.md` (frozen forward surface) + `STABILITY.md`; ≥1 downstream consumer
@@ -114,13 +135,16 @@ anukūlana's fidelity gate can lean on `ru_model_fwd`.
 
 ## v1.0 criteria
 
-- [ ] Public API frozen + documented (`docs/api.md` + `STABILITY.md`)
-- [ ] **Bit-identical parity vs attn11 forward** (the core gate) + full coverage
-- [ ] KV-cache decode == uncached
-- [ ] Fuzz clean (malformed configs rejected) + bench (`docs/benchmarks.md`)
-- [ ] Security audit + `SECURITY.md`
+- [ ] Public API frozen + documented (`docs/api.md` + `STABILITY.md`). Documented
+      in 0.5.2; not frozen, and no `STABILITY.md` yet.
+- [x] **Bit-identical parity vs attn11 forward** (the core gate) + full coverage
+      (attn11's `test_rupantara_parity`; execution coverage 22/22 public fns)
+- [x] KV-cache decode == uncached (`decode.tcyr`, `guard.tcyr`, fuzz P2)
+- [x] Fuzz clean (malformed configs rejected) + bench (`docs/benchmarks.md`) (0.5.2)
+- [x] Security audit + `SECURITY.md` (`docs/audit/2026-11-09-audit.md`)
 - [ ] ≥1 downstream consumer green (anukūlana)
-- [ ] CHANGELOG complete; version consistency (CI docs gate)
+- [ ] CHANGELOG complete; version consistency (CI docs gate). The gate exists and
+      checks `VERSION`, the CHANGELOG and `rupantara_version()`.
 
 ---
 

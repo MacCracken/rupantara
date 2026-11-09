@@ -1,0 +1,23 @@
+date,version,benchmark,time_ns
+2026-11-09T20:36:24Z,0.5.1,"ru_attn_core_fwd T=128 C=768 nh=12",18133000
+2026-11-09T20:36:24Z,0.5.1,"ru_attn_core_fwd T=128 C=768 nh=12 nkv=4",19026000
+2026-11-09T20:36:24Z,0.5.1,"ru_attn_core_fwd_row pos=511 C=768 nh=12",1166000
+2026-11-09T20:36:24Z,0.5.1,"ru_head_fwd_row C=768 V=12564 (1/4 LM head row)",8952000
+2026-11-09T20:36:24Z,0.5.1,"ru_ln_fwd 64x768",585739
+2026-11-09T20:36:24Z,0.5.1,"ru_gelu_fwd n=64x3072",19301000
+2026-11-09T20:36:24Z,0.5.1,"ru_softmax_fwd 1x50257",1231000
+2026-11-09T20:36:24Z,0.5.1,"ru_embed_fwd 64x768",201482
+2026-11-09T20:36:24Z,0.5.1,"ru_model_fwd V=1024 C=256 T=64 nh=4 NL=2 F=1024",67428000
+2026-11-09T20:36:24Z,0.5.1,"ru_model_fwd_row pos=63 (same model, one decode step)",1133000
+2026-11-09T20:55:47Z,0.5.2,"ru_attn_core_fwd T=128 C=768 nh=12",12244000
+2026-11-09T20:55:47Z,0.5.2,"ru_attn_core_fwd T=128 C=768 nh=12 nkv=4",12543000
+2026-11-09T20:55:47Z,0.5.2,"ru_attn_core_fwd_row pos=511 C=768 nh=12",779563
+2026-11-09T20:55:47Z,0.5.2,"ru_head_fwd_row C=768 V=12564 (1/4 LM head row)",8905000
+2026-11-09T20:55:47Z,0.5.2,"ru_ln_fwd 64x768",559280
+2026-11-09T20:55:47Z,0.5.2,"ru_gelu_fwd n=64x3072",18883000
+2026-11-09T20:55:47Z,0.5.2,"ru_softmax_fwd 1x50257",1200000
+2026-11-09T20:55:47Z,0.5.2,"ru_embed_fwd 64x768",20381
+2026-11-09T20:55:47Z,0.5.2,"ru_model_fwd V=1024 C=256 T=64 nh=4 NL=2 F=1024",63852000
+2026-11-09T20:55:47Z,0.5.2,"ru_model_fwd_row pos=63 (same model, one decode step)",1037000
+2026-11-09T20:55:47Z,0.5.2,"ru_model_fwd_s (same model, caller scratch)",61525000
+2026-11-09T20:55:47Z,0.5.2,"ru_model_fwd_row_s pos=63 (same model, caller scratch)",1081000

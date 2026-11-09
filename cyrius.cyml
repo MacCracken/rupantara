@@ -1,7 +1,7 @@
 [package]
 name = "rupantara"
 version = "${file:VERSION}"
-description = "rupantara (रूपान्तर — transformation / metamorphosis) — sovereign transformer FORWARD blocks (attention / MLP / LayerNorm / RMSNorm / pre-norm block / positional embeddings / KV-cache decode) for AGNOS, extracted from attn11 so consumers (anukulana, the murti load-seam) run a transformer without depending on attn11-the-binary. Pure Cyrius; M0 is a buildable scaffold."
+description = "rupantara (रूपान्तर — transformation / metamorphosis) — sovereign transformer FORWARD blocks (causal MHA/GQA/MQA attention / GELU MLP / LayerNorm / pre-norm block / learned positional embeddings / weight-tied LM head / KV-cache decode) for AGNOS, extracted from attn11 so consumers (anukulana, the murti load-seam) run a transformer without depending on attn11-the-binary. Pure Cyrius, f64, bit-identical to attn11's forward."
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/rupantara"
 language = "cyrius"
@@ -18,10 +18,11 @@ cyrius = "6.7.18"
 entry = "programs/smoke.cyr"
 output = "build/rupantara_smoke"
 
-# `[lib]` feeds `cyrius distlib`. M1 adds the extracted transformer-forward
-# modules (attention/mlp/norm/block/embed) from attn11 here, in dependency order.
+# `[lib]` feeds `cyrius distlib`: the transformer-forward modules, in dependency order
+# (guard first: the error codes and checked size arithmetic the others return / use).
 [lib]
 modules = [
+    "src/guard.cyr",
     "src/norm.cyr",
     "src/act.cyr",
     "src/attn.cyr",

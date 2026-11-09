@@ -6,6 +6,110 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-09
+
+The P(-1) hardening, optimization and repair sweep, recorded in
+[`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md). No public
+signature changed. For valid input every output is bit-identical to 0.5.1: a
+6,742-value raw-bits golden dump is byte-identical on x86_64, on aarch64
+(qemu), and when built with cyrius 6.6.2.
+
+### Fixed
+
+- **Decoding past the context window wrote past the KV cache** (HIGH).
+  `ru_model_fwd_row` at `pos >= T` returned 0 and appended each layer's K and V
+  at `pos * Ckv`: into the next layer's region, and past the end of the buffer
+  for the last layer's V. It also read past the learned position table. A
+  position outside `[0, T)` now returns `RU_ERR_POS` before anything is
+  written.
+- **Configs were not validated.** `nh = 0` or `nkv > nh` divided by zero.
+  `nh % nkv != 0` sent heads past the last K/V head, reading off the K/V rows.
+  `C % nh != 0` left concat columns unwritten. `attn_bias = 2` read biases past
+  the block. Sizes could wrap an i64. The new public `ru_cfg_check` rejects all
+  of these, and every buffer size is now overflow-checked and capped at 2^56
+  elements.
+- **Token ids were not checked.** An id outside `[0, V)` read past the token
+  embedding. Both forward entries now return `RU_ERR_TOKEN`.
+- **Decode loops grew the heap without bound.** `ru_model_fwd_row` made 17
+  allocations per token and `ru_model_fwd` 15 per call, all from a bump
+  allocator that never frees: 106.5 MB per 1,000 steps at GPT-2 widths. The new
+  `ru_model_fwd_s` and `ru_model_fwd_row_s` run on caller-owned scratch and
+  allocate nothing (0 bytes over the same 1,000 steps). The allocating entries
+  keep their behaviour but make one allocation per call.
+- `ru_attn_fwd` silently ran learned-absolute attention for `pos_kind = 1`
+  (RoPE). It now returns `RU_ERR_ARG`. `ru_argmax(…, 0)` read an empty row and
+  now returns `RU_ERR_ARG`. `ru_attn_arena_size` divided by zero at `nh = 0`
+  and now returns -1.
+- Rejected calls write nothing: logits, probs and the KV cache keep their
+  contents. Every error code is listed in `docs/api.md`.
+- `tests/tcyr/gpu.tcyr` failed one case under aarch64, and 0.5.1 fails it too.
+  `linear_fwd_gpu`'s padded-tile CPU fallback sends a ragged last tile's
+  final `N % 4` columns through `linear_fwd`'s packed body, which is fused on
+  aarch64. x86_64, the GPU target, is unaffected. The caveat is documented, and
+  the test holds those columns to 1e-12 on aarch64 and every other element
+  bit-exact. Every suite now passes under qemu-aarch64.
+
+### Added
+
+- `src/guard.cyr`: the error codes (`RU_OK`, `RU_ERR_CFG`, `RU_ERR_TOKEN`,
+  `RU_ERR_POS`, `RU_ERR_ARG`, written as functions so the bundle still compiles
+  on pre-6.7 cyrius) and overflow-checked size arithmetic.
+- `ru_cfg_check`, `ru_model_fwd_s`, `ru_model_fwd_row_s`,
+  `ru_model_scratch_count`, `ru_decode_scratch_count`.
+- `docs/api.md`, `docs/benchmarks.md`, `SECURITY.md`, ADR 0002 (optimizations
+  preserve bits) and ADR 0003 (validate at the model entries).
+- **Tests: 59 → 164 assertions.**
+  - `tests/tcyr/guard.tcyr` (78): validation and the no-write guarantee.
+  - `tests/tcyr/reference.tcyr` (27): both attention cores held bit for bit to
+    the 0.5.1 loops, kept verbatim in `tests/reference.cyr`, and the forward
+    held within 1e-9 to an independent plain-loop implementation.
+  - `tests/rupantara.fcyr`: 20,000 seeded fuzz rounds × 5 properties.
+  - `tests/rupantara.bcyr`: 12 benchmarks.
+  - `scripts/bench-history.sh` with `bench-history.csv`.
+  - Eight planted bugs were all caught.
+
+### Changed — faster, same bits
+
+- **Attention 1.5×.** The PV accumulation is one `f64v_axpy` per key, and both
+  cores run one shared per-head routine, so batch and decode cannot drift.
+  - `ru_attn_core_fwd` (T=128, C=768, nh=12): 18.1 → 12.2 ms.
+  - The cached row: 1.17 → 0.78 ms.
+- **Embedding 9.9×** (201 → 20 µs), and the residual adds run on the same
+  helper, `f64v_add`.
+- The whole forward is 1.06× faster and a decode step 1.09×. See
+  `docs/benchmarks.md`.
+
+### Changed — CI, build, docs
+
+- **Workflows.**
+  - Actions are pinned by commit SHA.
+  - The token is read-only by default; only the publish job can write.
+  - `persist-credentials: false`.
+  - The dist check now covers the `.deps` sidecar.
+  - New gates: doc check, fuzz, benchmarks, the gpulayer build, and running
+    the smoke binary.
+  - The release fails if the bundle differs from the commit.
+- **Lint and fmt** cover every Cyrius source, test helpers included. The
+  Makefile gains `fuzz`, `bench` and `doc`.
+- **Every public function is documented** (`cyrius doc --check` clean), and
+  strict lint reports 0 warnings and 0 untracked deferrals.
+- **The README, CLAUDE.md, `cyrius.cyml` description and ADR index** had
+  drifted; they are corrected. The ADR index was another project's. The README
+  and description claimed RMSNorm, which is not implemented.
+- **Suites and programs** exit through `SYS_EXIT` and write through
+  `sys_write`, not literal syscall numbers.
+
+### Corrected
+
+- **0.4.4 said "No change to the forward". It did change.** cyrius 6.6.13
+  (ganita 1.2.11) replaced `f64_tanh` with fdlibm's `expm1` form, an accuracy
+  fix. GELU differs by up to 2 ulp between builds on cyrius ≤ 6.6.12 and
+  ≥ 6.6.13, and model outputs by up to 2.7e-13 relative. LayerNorm, softmax,
+  `f64_exp` and `linear_fwd` did not move.
+- attn11's parity test is unaffected: it compiles both sides with one
+  toolchain. attn11's own GELU outputs will shift by these amounts when it
+  moves off 6.6.2.
+
 ## [0.5.1] - 2026-11-09
 
 A toolchain and dependency realign onto the latest releases. No change to the

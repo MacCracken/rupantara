@@ -2,11 +2,17 @@
 #
 #   make build   — link-check the library (programs/smoke.cyr)
 #   make test    — CPU test suites (tests/tcyr/*.tcyr)
+#   make fuzz    — seeded property fuzzing (tests/rupantara.fcyr; exit 1 = a property failed)
+#   make bench   — benchmarks (tests/rupantara.bcyr); scripts/bench-history.sh records them
 #   make dist    — regenerate dist/rupantara.cyr via `cyrius distlib`
-#   make lint / fmt-check / vet  — quality gates
+#   make lint / fmt-check / vet / doc  — quality gates
 #   make clean   — scrub build/
 
 CYRIUS ?= cyrius
+
+# every Cyrius source the gates cover: the library, programs, suites, shared test
+# helpers / oracles, the benchmark and the fuzz harness
+SOURCES = src/*.cyr programs/*.cyr tests/tcyr/*.tcyr tests/*.cyr tests/*.bcyr tests/*.fcyr
 
 .PHONY: check-lib-wiring
 check-lib-wiring:
@@ -25,10 +31,24 @@ build: check-lib-wiring
 test: check-lib-wiring
 	@for f in tests/tcyr/*.tcyr; do $(CYRIUS) test "$$f" || exit 1; done
 
+.PHONY: fuzz
+fuzz: check-lib-wiring
+	@mkdir -p build
+	CYRIUS_DCE=1 $(CYRIUS) build tests/rupantara.fcyr build/rupantara-fuzz
+	timeout 120 ./build/rupantara-fuzz
+
+.PHONY: bench
+bench: check-lib-wiring
+	CYRIUS_DCE=1 $(CYRIUS) bench tests/rupantara.bcyr
+
+.PHONY: doc
+doc:
+	$(CYRIUS) doc --check src/*.cyr
+
 .PHONY: lint
 lint:
 	@fail=0; \
-	for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr; do \
+	for f in $(SOURCES); do \
 		out=$$($(CYRIUS) lint $$f 2>&1); echo "$$out"; \
 		echo "$$out" | grep -qE '^\s*warn ' && fail=1; \
 	done; \
@@ -37,7 +57,7 @@ lint:
 .PHONY: fmt-check
 fmt-check:
 	@fail=0; \
-	for f in src/*.cyr programs/*.cyr tests/tcyr/*.tcyr; do \
+	for f in $(SOURCES); do \
 		if ! $(CYRIUS) fmt $$f --check > /dev/null 2>&1; then \
 			echo "needs fmt: $$f"; fail=1; \
 		fi; \
@@ -53,7 +73,7 @@ dist:
 	$(CYRIUS) distlib
 
 .PHONY: test-all
-test-all: dist test
+test-all: dist test fuzz
 
 .PHONY: clean
 clean:
