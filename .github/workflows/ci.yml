@@ -128,4 +128,8 @@ jobs:
         run: |
           VERSION=$(tr -d '[:space:]' < VERSION)
           grep -q "^## \[$VERSION\]" CHANGELOG.md || { echo "FAIL: version not in CHANGELOG.md"; exit 1; }
-          echo "Version consistent: $VERSION"
+          # rupantara_version() packs major*10000 + minor*100 + patch; it drifted at 0.4.1 and 0.4.3.
+          PACKED=$(echo "$VERSION" | awk -F. '{ print $1*10000 + $2*100 + $3 }')
+          ACTUAL=$(awk '/^fn rupantara_version\(/ { f=1 } f && /return/ { gsub(/[^0-9]/, ""); print; exit }' src/blocks.cyr)
+          [ "$ACTUAL" = "$PACKED" ] || { echo "FAIL: rupantara_version() returns $ACTUAL, VERSION $VERSION packs to $PACKED"; exit 1; }
+          echo "Version consistent: $VERSION ($PACKED)"

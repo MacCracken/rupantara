@@ -6,6 +6,40 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-09
+
+A toolchain and dependency realign. No change to the forward.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`.** Suite **59/59** across 6 files, identical to
+  the 6.6.2 baseline. fmt, lint and vet are clean. The DCE smoke binary grows
+  from 37,752 to 38,072 B.
+- **`[deps.rosnet]` `1.1.1` → `1.1.3`**, the rosnet release built against
+  6.6.20. rosnet's CPU bundle changed only in whitespace between the two tags.
+  The code changes are in its GPU backend, which rupantara does not use. So
+  `linear_fwd` is unchanged and the attn11 parity contract is untouched. rosnet
+  pulls tyche `1.1.1` in transitively. rupantara never calls `t_randn`, the one
+  function that needs it.
+- **Vendored `lib/` re-synced** (`cyrius lib sync --full`). It byte-matches the
+  6.6.20 snapshot. This clears the warning that `./lib/` shadowed 11 pinned
+  bundled libs (bayan, sakshi, niyama, sigil, sandhi, yukti, patra, vani, mabda,
+  sankoch, yantra). `cyrius.lock` was regenerated from scratch, and
+  `cyrius deps --verify` is clean.
+- **`dist/` regenerated.** From 6.6.18, `cyrius distlib` lists only the stdlib
+  leaves the bundle provably needs (compile-verified), and also writes them as
+  `include` lines at the top of the bundle. `dist/rupantara.deps` goes from 11
+  leaves to 2 (`math` and `ganita`). `linear_fwd` and the tensor helpers stay
+  unresolved in the bundle, as before, so consumers still declare
+  `[deps.rosnet]`.
+
+### Fixed
+
+- **`rupantara_version()` drifted again.** Through 0.4.3 it still returned `402`.
+  It is now `404`, and the `smoke.tcyr` assertion moves with it. CI's docs job
+  now also checks the packed constant in `src/blocks.cyr` against `VERSION`, so
+  a third drift fails the build.
+
 ## [0.4.3] - 2026-09-11
 
 ### Changed
