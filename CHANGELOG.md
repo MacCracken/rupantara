@@ -6,6 +6,43 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-09
+
+Moves rupantara onto the cyrius 6.7 series. No change to the forward or the API.
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`** (through 6.7.0–6.7.8). `src/` needed no
+  change. Suite **59/59** across 6 files, identical to 0.4.4. fmt, lint and vet
+  are clean. The DCE smoke binary stays at 38,072 B.
+
+  Upstream changes checked against rupantara's source (`src/`, `programs/`,
+  `tests/`):
+  - **6.7.0–6.7.8** reserve `trait`, `const`, `true`, `false`, `do` and `dyn`.
+    rupantara uses none of them outside comments.
+  - **6.7.3** makes `!` a real operator. Before that a lone `!x` compiled as
+    `x`. rupantara has no `!` outside `!=`.
+  - **6.7.9** makes unary `-` and `~` on a constant bind tighter, and
+    **6.7.8–6.7.9** change how typed `*T` pointers step and dereference.
+    rupantara has neither: its buffers are untyped addresses read with
+    `load64` / `store64`.
+  - **6.7.6** rounds every write into an `f32`. rupantara has no `f32`.
+  - The stdlib functions the forward computes with did not change. In `math`,
+    only `f64_parse` changed (a length-bounded `f64_parse_n` was added), and
+    rupantara does not call it. `ganita` changed only its version line
+    (`1.2.14` → `1.2.15`). So `f64_exp` and `f64_tanh` give the same results
+    as before. That keeps the attn11 parity contract intact while attn11 is
+    still on an older pin.
+- **`[deps.rosnet]` `1.1.3` → `1.2.0`**, the rosnet release built against
+  6.7.9. rosnet's `src/` is unchanged between the two tags. rosnet reports its
+  CPU ops give byte-identical f64 results at 1.1.3 @ 6.6.20 and 1.2.0 @ 6.7.9,
+  `linear_fwd` included. rosnet now pulls tyche `1.2.0` in transitively.
+- **Vendored `lib/` re-synced** (`cyrius lib sync --full`). It byte-matches the
+  6.7.9 snapshot. `cyrius.lock` was regenerated from scratch: one line per git
+  dep, trailer `cyrius 6.7.9`. `cyrius deps --verify` is clean.
+- `dist/rupantara.cyr` changes only in its version line and the version
+  constant. `dist/rupantara.deps` is unchanged.
+
 ## [0.4.4] - 2026-11-09
 
 A toolchain and dependency realign. No change to the forward.

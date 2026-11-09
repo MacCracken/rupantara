@@ -3,7 +3,7 @@ include "src/lib.cyr"
 include "lib/assert.cyr"
 
 fn test_version() {
-    assert_eq(rupantara_version(), 404, "version 0.4.4 packs to 404");
+    assert_eq(rupantara_version(), 500, "version 0.5.0 packs to 500");
     return 0;
 }
 
