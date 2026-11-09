@@ -6,6 +6,48 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-09
+
+A toolchain and dependency realign onto the latest releases. No change to the
+forward's results or the API.
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`** (through 6.7.10–6.7.17), the latest cyrius
+  release. `src/` needed no code change. Suite **59/59** across 6 files,
+  identical to 0.5.0. fmt and vet are clean, and lint stays at 0 warnings
+  under 6.7.11's and 6.7.12's new lint rules. The DCE smoke binary shrinks from
+  38,072 to 37,584 B. The 6.7.10–6.7.18 behaviour changes are almost all new
+  compile-time refusals (generics, struct and pointer shapes, enums), plus
+  runtime changes in net, TLS, thread-local slots and pam. rupantara uses none
+  of these, and the build, the tests and the golden dump below confirm it.
+- **`[deps.rosnet]` `1.2.0` → `1.2.2`**, the latest rosnet, built against
+  6.7.18. 1.2.2 rewrites `linear_fwd`, the projection matmul behind every
+  rupantara layer: one packed `f64v_axpy` per row step instead of
+  `f64v_fmadd` per four elements. It is about 2.7× faster at 64×768×768.
+  rosnet's ADR 0002 keeps each output's rounding sequence (on x86_64 the axpy
+  is unfused `mulpd` + `addpd`), and rosnet's own golden dump is bit-identical.
+  **Checked independently here.** A scratch golden dump recorded 6,742 raw f64
+  bit patterns, built at 0.5.0 (6.7.9 + rosnet 1.2.0) and again at 0.5.1
+  (6.7.18 + rosnet 1.2.2), and the two are byte-identical. The dump covers
+  `ru_model_fwd` logits and probs, the cached `ru_model_fwd_row` decode and
+  `ru_argmax`, over 6 configs (MHA ±bias, GQA, MQA, 3 blocks, odd V = 37 / C = 24,
+  C = 64). It also covers `ru_ln_fwd`, `ru_gelu_fwd`, `ru_mlp_fwd`,
+  `ru_softmax_fwd`, `linear_fwd` and `linear_fwd_gpu` at shapes with 1–3
+  element vector tails. So the attn11 parity contract is untouched.
+  rosnet's other 1.2.2 fixes are in its GPU profile and in `t_alloc(0)`, which
+  rupantara does not call. rosnet now pulls tyche `1.2.2` in transitively.
+- **Vendored `lib/` re-synced** (`cyrius lib sync --full`). It byte-matches the
+  6.7.18 snapshot. `cyrius.lock` was regenerated from scratch: one line per git
+  dep, trailer `cyrius 6.7.18`. `cyrius deps --verify` and `cyrius deps --locked`
+  are clean. rupantara gitignores both `lib/` and the lock, so CI's fresh
+  `cyrius deps` is not affected by rosnet 1.2.1's note that a moved pin, `lib/`
+  and the lock must land together.
+- **`src/gpu.cyr`'s bit-identity note** names `f64v_axpy` as `linear_fwd`'s body
+  (it named `f64v_fmadd`). The argument it makes is unchanged.
+- `dist/rupantara.cyr` changes only in its version line, the version constant
+  and that comment. `dist/rupantara.deps` is unchanged.
+
 ## [0.5.0] - 2026-11-09
 
 Moves rupantara onto the cyrius 6.7 series. No change to the forward or the API.

@@ -35,17 +35,18 @@ SSM/MoE/MTP paths are not de-duplicated (rupantara has no peer, by design).
 
 ## Toolchain
 
-Cyrius pin **6.7.9** (`cyrius.cyml`). Deps: `math` (f64_exp/F64_PI) + `ganita`
-(f64_tanh); **`rosnet` 1.2.0** (`linear_fwd` matmul + tensor helpers) via
+Cyrius pin **6.7.18** (`cyrius.cyml`). Deps: `math` (f64_exp/F64_PI) + `ganita`
+(f64_tanh); **`rosnet` 1.2.2** (`linear_fwd` matmul + tensor helpers) via
 `[deps.rosnet]`, git+tag (no path override — resolves from the release tag). rosnet
-pulls `tyche` 1.2.0 in transitively.
+pulls `tyche` 1.2.2 in transitively.
 
-**Pin bumped to `6.7.9` 2026-11-09** (0.5.0, the move onto the 6.7 series; 0.4.4 took
-it to 6.6.20 the same day). `cyrius lib sync --full` re-vendored the whole
-version-matched stdlib snapshot, and rosnet moved to 1.2.0, its 6.7.9 build. The suite
-re-verified **59/59** at the new pin. attn11 still pins an older toolchain and rosnet,
-and will be moved up separately. Parity is not at risk meanwhile: `f64_exp`,
-`f64_tanh` and `linear_fwd` are unchanged across these pins.
+**Pin bumped to `6.7.18` 2026-11-09** (0.5.1; 0.4.4 took it to 6.6.20 and 0.5.0 to 6.7.9
+the same day). `cyrius lib sync --full` re-vendored the whole version-matched stdlib
+snapshot, and rosnet moved to 1.2.2, the latest release. The suite re-verified **59/59**
+at the new pin. rosnet 1.2.2 rewrites `linear_fwd` for speed. A 6,742-value raw-bits
+dump of the forward is byte-identical between 0.5.0 and 0.5.1. attn11 still pins an
+older toolchain and rosnet, and will be moved up separately. Parity is not at risk
+meanwhile: `f64_exp`, `f64_tanh` and `linear_fwd` give the same bits across these pins.
 
 ## Build artifacts
 
