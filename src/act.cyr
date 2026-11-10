@@ -9,6 +9,23 @@ fn _ru_gelu_a(): i64 { return f64_div(f64_from(44715), f64_from(1000000)); }    
 
 # y[i] = gelu(x[i]) for i < n (the tanh form above). A leaf kernel: y may alias x.
 fn ru_gelu_fwd(x, y, n): i64 {
+    return _ru_gelu_rows(x, y, 0, n);
+}
+
+# As ru_gelu_fwd, and also writes t[i] = tanh(c*(x[i] + a*x[i]^3)), the exact value the
+# forward used (0.6.1). A GELU backward needs that t, and recomputing it costs one
+# f64_tanh per element (about 95 ns since ganita 1.2.11): attn11 measured -17% per
+# training step by reusing it (docs/development/issues/2026-11-09-gelu-fwd-tanh-output.md).
+# The t a backward recomputes — x2 = x*x, x3 = x2*x, the same inner and constants — is
+# this t bit for bit. y is bit-identical to ru_gelu_fwd's. A leaf kernel: y may alias x;
+# t must not overlap y.
+fn ru_gelu_fwd_t(x, y, t, n): i64 {
+    return _ru_gelu_rows(x, y, t, n);
+}
+
+# The one GELU loop both entries run, so the t one hands out is the t the other used.
+# t == 0: no tanh output.
+fn _ru_gelu_rows(x, y, t, n): i64 {
     var c = _ru_gelu_c();
     var a = _ru_gelu_a();
     var half = f64_div(f64_from(1), f64_from(2));
@@ -18,8 +35,9 @@ fn ru_gelu_fwd(x, y, n): i64 {
         var xv = load64(x + i * 8);
         var x3 = f64_mul(f64_mul(xv, xv), xv);
         var inner = f64_mul(c, f64_add(xv, f64_mul(a, x3)));
-        var t = f64_tanh(inner);
-        store64(y + i * 8, f64_mul(f64_mul(half, xv), f64_add(one, t)));
+        var th = f64_tanh(inner);
+        store64(y + i * 8, f64_mul(f64_mul(half, xv), f64_add(one, th)));
+        if (t != 0) { store64(t + i * 8, th); }
         i = i + 1;
     }
     return 0;

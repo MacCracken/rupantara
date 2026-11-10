@@ -6,6 +6,48 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-09
+
+attn11's filed proposal: GELU that also hands out its tanh. It is additive;
+every existing output keeps its bits on x86_64 and aarch64.
+
+### Added
+
+- **`ru_gelu_fwd_t(x, y, t, n)`.** It writes the same `y` as `ru_gelu_fwd`, and
+  also `t[i] = tanh(c·(x[i] + a·x[i]³))`, the value the forward used.
+  - **Why:** a GELU backward needs that `t`. Recomputing it costs one
+    `f64_tanh` per element, about 95 ns since ganita 1.2.11. attn11's
+    prototype measured −25.8% on `model_backward` and −17.4% per training
+    step by reusing it, with every training output byte-identical.
+  - **Bit-exact for attn11.** attn11's `gelu_bwd` forms `x2 = x·x`,
+    `x3 = x2·x`, the same `inner` and the same constants, so it recomputes this
+    `t` bit for bit.
+  - **One loop.** Both entries run the internal `_ru_gelu_rows`, so the two
+    cannot drift.
+  - **Aliasing:** `y` may alias `x`; `t` must not overlap `y`.
+  - **Closes** `docs/development/issues/2026-11-09-gelu-fwd-tanh-output.md`.
+
+### Tests
+
+- **`ops` +3 assertions (192 → 195).**
+  - `y` is bit-identical to `ru_gelu_fwd`'s;
+  - `t` is bit-identical to the tanh recomputed in `gelu_bwd`'s form;
+  - both hold in place.
+
+  The inputs are a [-10, 10] sweep plus ±0, the smallest subnormal, ±1000, 30,
+  1e-6 and -5.
+- **The golden gate gains an `@gelu-t sweep` case**, with `y` and `t` over
+  [-10, 10]: 1,602 values per target, 11,550 in all.
+  - **The re-bless only appended lines.** The first 9,969 lines of both files
+    are byte-identical to 0.6.0's, so no existing value moved.
+  - **A count fix:** the 0.6.0 entry below said 9,969 values. That was the line
+    count, labels and comments included. It held 9,948 values, and is
+    corrected below.
+- **Fuzz P7:** `ru_gelu_fwd_t` on each round's random values (±0, subnormals
+  and ±1000 included), against `ru_gelu_fwd` and the recomputed tanh. 20,000
+  rounds × 7 properties, 0 failures.
+- **Bench:** a `ru_gelu_fwd_t n=64x3072` row next to `ru_gelu_fwd`'s.
+
 ## [0.6.0] - 2026-11-09
 
 The rupantara side of the 0.6.x roadmap: a committed golden gate, the
@@ -18,7 +60,7 @@ and aarch64.
 - **A committed golden gate.** `tests/tcyr/golden.tcyr` regenerates
   `tests/golden.cyr`'s dump and compares it, line by line, with the committed
   `tests/golden/x86_64.txt` or `tests/golden/aarch64.txt`.
-  - **Coverage:** 9,969 raw 64-bit patterns per target, in 19 cases:
+  - **Coverage:** 9,948 raw 64-bit patterns per target, in 19 cases:
     - the model forward and decode at six configs (MHA ± bias, GQA over three
       blocks, MQA, odd widths, C = 64), with each call's return code and the
       parameter count;

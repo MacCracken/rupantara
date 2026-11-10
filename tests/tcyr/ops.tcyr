@@ -50,11 +50,55 @@ fn test_gelu_fwd() {
     return 0;
 }
 
+# the tanh a GELU backward recomputes for x, in attn11's gelu_bwd form (x2 = x*x, x3 = x2*x)
+fn _bwd_tanh(xv): i64 {
+    var x2 = f64_mul(xv, xv);
+    var x3 = f64_mul(x2, xv);
+    return f64_tanh(f64_mul(_ru_gelu_c(), f64_add(xv, f64_mul(_ru_gelu_a(), x3))));
+}
+
+# ru_gelu_fwd_t (0.6.1): y bit-identical to ru_gelu_fwd's and t bit-identical to the tanh a
+# backward recomputes, over x = (i - 400) / 40 (i < 801) plus edge values, and in place.
+fn test_gelu_fwd_t() {
+    var n = 809;
+    var x = alloc(n * 8);
+    var i = 0;
+    while (i < 801) { store64(x + i * 8, f64_div(f64_from(i - 400), f64_from(40))); i = i + 1; }
+    store64(x + 801 * 8, 0);                                    # +0
+    store64(x + 802 * 8, 0x8000000000000000);                   # -0
+    store64(x + 803 * 8, 1);                                    # the smallest subnormal
+    store64(x + 804 * 8, f64_from(1000));
+    store64(x + 805 * 8, f64_sub(f64_from(0), f64_from(1000)));
+    store64(x + 806 * 8, f64_from(30));
+    store64(x + 807 * 8, f64_div(f64_from(1), f64_from(1000000)));
+    store64(x + 808 * 8, f64_sub(f64_from(0), f64_from(5)));
+    var y0 = alloc(n * 8);
+    var y1 = alloc(n * 8);
+    var t = alloc(n * 8);
+    ru_gelu_fwd(x, y0, n);
+    ru_gelu_fwd_t(x, y1, t, n);
+    assert_eq(bits_diff(y0, y1, n), 0, "ru_gelu_fwd_t y == ru_gelu_fwd y, bit for bit");
+    var td = 0;
+    i = 0;
+    while (i < n) {
+        if (load64(t + i * 8) != _bwd_tanh(load64(x + i * 8))) { td = td + 1; }
+        i = i + 1;
+    }
+    assert_eq(td, 0, "ru_gelu_fwd_t t == the backward's recomputed tanh, bit for bit");
+    var xc = alloc(n * 8);
+    var t2 = alloc(n * 8);
+    t_copy(xc, x, n);
+    ru_gelu_fwd_t(xc, xc, t2, n);
+    assert_eq(bits_diff(xc, y0, n) + bits_diff(t2, t, n), 0, "ru_gelu_fwd_t in place (y == x)");
+    return 0;
+}
+
 # runs the suite; the exit code is the failure count
 fn main(): i64 {
     alloc_init();
     test_ln_fwd();
     test_gelu_fwd();
+    test_gelu_fwd_t();
     return assert_summary();
 }
 

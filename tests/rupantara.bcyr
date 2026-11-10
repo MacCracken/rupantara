@@ -7,7 +7,8 @@
 #   - ru_attn_core_fwd T=128 C=768 nh=12 nkv=4  (the same with GQA)
 #   - ru_attn_core_fwd_row pos=511 C=768 nh=12  (one decode step's attention at a 512 context)
 #   - ru_head_fwd_row C=768 V=12564             (a quarter of GPT-2's weight-tied LM head, one row)
-#   - ru_ln_fwd 64x768, ru_gelu_fwd 64x3072, ru_softmax_fwd 1x50257, ru_embed_fwd 64x768
+#   - ru_ln_fwd 64x768, ru_gelu_fwd 64x3072 (and ru_gelu_fwd_t, 0.6.1), ru_softmax_fwd 1x50257,
+#     ru_embed_fwd 64x768
 #   - ru_model_fwd / ru_model_fwd_row on a small GPT (V=1024 C=256 T=64 nh=4 NL=2 F=1024, bias),
 #     allocating and on caller scratch (the _s entries, 0.5.2)
 #   - GPT-2 small (V=50257 C=768 T=1024 nh=12 NL=12 F=3072, bias; 124M params, 1 GB f64,
@@ -112,6 +113,13 @@ fn bench_leaf_ops(): i64 {
     while (i < 20) { ru_gelu_fwd(h, hy, M * F); i = i + 1; }
     bench_batch_stop(b2, 20);
     bench_report(b2);
+    var ht = t_alloc(M * F);
+    var b2t = bench_new("ru_gelu_fwd_t n=64x3072 (also writes tanh, 0.6.1)");
+    bench_batch_start(b2t);
+    i = 0;
+    while (i < 20) { ru_gelu_fwd_t(h, hy, ht, M * F); i = i + 1; }
+    bench_batch_stop(b2t, 20);
+    bench_report(b2t);
     var lg = t_alloc(V);
     var pr = t_alloc(V);
     _bfill(lg, V, 13);

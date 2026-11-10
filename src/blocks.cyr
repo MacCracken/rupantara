@@ -20,14 +20,14 @@
 # With attn bias, bq(C) bk(Ckv) bv(Ckv) bo(C) are appended after the base block
 # (Ckv = nkv*(C/nh)); the base weight offsets are unchanged.
 
-# Packed version int: major*10000 + minor*100 + patch (0.6.0 -> 600).
+# Packed version int: major*10000 + minor*100 + patch (0.6.1 -> 601).
 # NOTE: this constant sat at 400 through the whole of 0.4.1 — the 0.4.1 cut moved VERSION
 # and the CHANGELOG but not this function, and tests/tcyr/smoke.tcyr asserted the stale
 # value with a message naming 0.4.0, so the gate confirmed the bug instead of catching it.
 # It drifted again through 0.4.3 (still 402). CI's docs job now checks it against VERSION.
 # Bump BOTH on every cut.
 fn rupantara_version(): i64 {
-    return 600;
+    return 601;
 }
 
 # ---- config descriptor (8 i64) ---------------------------------------------

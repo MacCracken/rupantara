@@ -1,9 +1,14 @@
 # rupantara — Current State
 
-> **Last refresh**: 2026-11-09 (0.6.0) | **Cadence**: every release.
+> **Last refresh**: 2026-11-09 (0.6.1) | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
+
+**0.6.1 (2026-11-09):** `ru_gelu_fwd_t`, GELU that also hands out its tanh so a
+consumer's backward reuses it. This was attn11's filed proposal
+([`issues/2026-11-09-gelu-fwd-tanh-output.md`](issues/2026-11-09-gelu-fwd-tanh-output.md)).
+It is additive, and every existing output keeps its bits.
 
 **0.6.0 (2026-11-09):** the rupantara side of the 0.6.x roadmap:
 
@@ -39,21 +44,21 @@ hardening, optimization and repair sweep
 
 The surface is documented in [`docs/api.md`](../api.md).
 
-**Suite: 192 assertions in 9 files, green on x86_64 and on aarch64 (qemu).**
+**Suite: 195 assertions in 9 files, green on x86_64 and on aarch64 (qemu).**
 
 | Suite | Assertions |
 |---|---:|
 | `smoke` | 1 |
-| `ops` | 9 |
+| `ops` | 12 |
 | `attn` | 12 |
 | `forward` | 30 |
 | `decode` | 5 |
 | `gpu` | 11 |
 | `guard` | 94 |
 | `reference` | 27 |
-| `golden` | 3 (9,969 raw bit patterns per target) |
+| `golden` | 3 (11,550 raw bit patterns per target) |
 
-Fuzz runs 20,000 rounds × 6 properties with 0 failures, and there are 14
+Fuzz runs 20,000 rounds × 7 properties with 0 failures, and there are 15
 benchmarks. fmt, lint, vet and doc are clean.
 
 - Execution coverage was 22/22 public functions at 0.5.2.

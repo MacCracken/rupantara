@@ -36,8 +36,11 @@ and the weight-tied LM head + softmax. The op surface is `ru_*`-namespaced.
 - GPT-2-small throughput: about 14 tokens/s prefill and 10 tokens/s decode on
   one core (`docs/benchmarks.md`).
 
-**192 assertions** pass on x86_64 and aarch64, plus a 20,000-round fuzz harness
-and 14 benchmarks.
+0.6.1 adds `ru_gelu_fwd_t`, which also returns GELU's tanh so a training
+backward can reuse it instead of recomputing it.
+
+**195 assertions** pass on x86_64 and aarch64, plus a 20,000-round fuzz harness
+and 15 benchmarks.
 Start with [`docs/api.md`](docs/api.md). See also
 [`docs/benchmarks.md`](docs/benchmarks.md), [`SECURITY.md`](SECURITY.md) and
 the [audit](docs/audit/2026-11-09-audit.md).
@@ -53,7 +56,7 @@ bit-identical** to attn11's `model_forward` on identical params
 per-layer K/V caches + `ru_argmax` greedy next-token. See
 [`docs/development/roadmap.md`](docs/development/roadmap.md) +
 [`docs/development/refold-plan.md`](docs/development/refold-plan.md). The Cyrius
-pin is in `cyrius.cyml` (6.7.18 as of 0.6.0).
+pin is in `cyrius.cyml` (6.7.18 as of 0.6.1).
 
 ## Build & test
 

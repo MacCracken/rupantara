@@ -14,6 +14,8 @@
 #   P6 ru_model_fwd_n_s (dirty scratch) and ru_model_fwd_n over a random n <= T, with
 #      the ids past n replaced by out-of-vocab ones: rows 0..n-1 == ru_model_fwd's, bit
 #      for bit, the logits rows past n untouched (0.6.0)
+#   P7 ru_gelu_fwd_t on random values: y == ru_gelu_fwd's and t == the tanh a backward
+#      recomputes (x2 = x*x, x3 = x2*x), bit for bit (0.6.1)
 # 20,000 rounds; the bump heap is rewound each round (alloc_reset), so memory stays
 # flat. Seeded (splitmix64), so a failure reproduces exactly; the failing round and the
 # property are printed. Exit 0 = every property held in every round.
@@ -155,6 +157,21 @@ fn fz_core(round): i64 {
     ru_attn_core_fwd_row(Q + pos * C * 8, K, Vv, pr1, r1, pos, C, nh, nkv);
     _ref051_attn_core_fwd_row(Q + pos * C * 8, K, Vv, pr0, r0, pos, C, nh, nkv);
     fz_check(bits_diff(r1, r0, C) == 0, round, "P3 ru_attn_core_fwd_row != the 0.5.1 row core");
+    # P7: GELU's tanh output over the same random Q values
+    var gy0 = t_alloc(T * C); var gy1 = t_alloc(T * C); var gt = t_alloc(T * C);
+    ru_gelu_fwd(Q, gy0, T * C);
+    ru_gelu_fwd_t(Q, gy1, gt, T * C);
+    var gd = bits_diff(gy0, gy1, T * C);
+    var gi = 0;
+    while (gi < T * C) {
+        var xv = load64(Q + gi * 8);
+        var x2 = f64_mul(xv, xv);
+        var x3 = f64_mul(x2, xv);
+        var th = f64_tanh(f64_mul(_ru_gelu_c(), f64_add(xv, f64_mul(_ru_gelu_a(), x3))));
+        if (load64(gt + gi * 8) != th) { gd = gd + 1; }
+        gi = gi + 1;
+    }
+    fz_check(gd == 0, round, "P7 ru_gelu_fwd_t y or t != ru_gelu_fwd / the backward's tanh");
     return 0;
 }
 
@@ -214,7 +231,7 @@ fn fz_reject(round): i64 {
     return 0;
 }
 
-# every round runs P1-P6; the exit code is 1 when any property failed
+# every round runs P1-P7; the exit code is 1 when any property failed
 fn main(): i64 {
     alloc_init();
     var seed = 0x5EED00000502;
@@ -230,7 +247,7 @@ fn main(): i64 {
     }
     _say("rupantara fuzz: ");
     fmt_int(rounds);
-    _say(" rounds x 6 properties, seed 0x5EED00000502, failures: ");
+    _say(" rounds x 7 properties, seed 0x5EED00000502, failures: ");
     fmt_int(_fz_fail);
     _say(_nl);
     if (_fz_fail != 0) { return 1; }

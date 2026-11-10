@@ -10,8 +10,8 @@
 # blocks, MQA, odd widths, C = 64), and each kernel called directly — the attention
 # cores (Pc included: attn11's backward reads it), ru_attn_fwd and its row form, the
 # embedding, head and softmax, one block, LayerNorm, GELU (a [-10, 10] sweep as well,
-# so a tanh change anywhere on its range shows), the MLP, linear_fwd and
-# linear_fwd_gpu. Inputs come from fill_det (tests/common.cyr), never a PRNG.
+# so a tanh change anywhere on its range shows) and ru_gelu_fwd_t's tanh output, the
+# MLP, linear_fwd and linear_fwd_gpu. Inputs come from fill_det (tests/common.cyr), never a PRNG.
 #
 # Included after src/lib.cyr and tests/common.cyr. Not a suite.
 
@@ -253,6 +253,21 @@ fn _gd_sweep(name): i64 {
     return 0;
 }
 
+# ru_gelu_fwd_t (0.6.1) over the same [-10, 10] sweep: y, then the tanh it hands out.
+fn _gd_gelu_t(name): i64 {
+    _gd_line(64, name);
+    var n = 801;
+    var x = t_alloc(n);
+    var i = 0;
+    while (i < n) { store64(x + i * 8, f64_div(f64_from(i - 400), f64_from(40))); i = i + 1; }
+    var y = t_alloc(n);
+    var t = t_alloc(n);
+    ru_gelu_fwd_t(x, y, t, n);
+    _gd_dump(y, n);
+    _gd_dump(t, n);
+    return 0;
+}
+
 # Build the whole dump into a fresh buffer. Returns its length in bytes, or -1 if
 # the text outgrew the buffer.
 fn gold_build(target): i64 {
@@ -281,6 +296,7 @@ fn gold_build(target): i64 {
     _gd_leaf(5, 8, 32, "leaf 8");
     _gd_leaf(4, 33, 71, "leaf 33x71");
     _gd_sweep("sweep gelu-softmax");
+    _gd_gelu_t("gelu-t sweep");
     if (_gd_over == 1) { return 0 - 1; }
     return _gd_len;
 }

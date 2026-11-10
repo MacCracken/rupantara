@@ -1,4 +1,4 @@
-# rupantara API (0.6.0)
+# rupantara API (0.6.1)
 
 The transformer **forward**: f64, CPU, pure Cyrius. Consumers import
 `dist/rupantara.cyr` through `[deps.rupantara]` and must also declare
@@ -146,6 +146,7 @@ they are part of the layout contract and will not be renamed before v1.0.
 |---|---|
 | `ru_ln_fwd(x, gamma, beta, y, mean, rstd, M, C)` | LayerNorm per row, eps 1e-5. `y` may alias `x`. |
 | `ru_gelu_fwd(x, y, n)` | GELU, tanh form (GPT-2). `y` may alias `x`. |
+| `ru_gelu_fwd_t(x, y, t, n)` | The same `y`, bit for bit, and also `t[i] = tanh(c·(x + a·x³))`, the value the forward used. A GELU backward that forms `x2 = x·x`, `x3 = x2·x` recomputes exactly this `t`, so it can load it instead of calling `f64_tanh` again (about 95 ns per element). `y` may alias `x`; `t` must not overlap `y`. (0.6.1) |
 | `ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv)` | Causal scaled-dot-product attention after the projections. Fills `Pc(nh,T,T)` and `concat(T,C)`. |
 | `ru_attn_core_fwd_row(q_row, Kc, Vc, prow, concat_row, pos, C, nh, nkv)` | One query against cache rows `0..pos`. |
 | `ru_attn_fwd(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x, out, ar, T, C, nh, nkv, pos_kind)` | Projections, the core, then Wo. Biases may be 0. `pos_kind` must be 0 (learned-absolute); 1 (RoPE) returns `RU_ERR_ARG`. Validated. |
@@ -171,8 +172,9 @@ they are part of the layout contract and will not be renamed before v1.0.
   differs by at most 1 ulp, in 75 of 801 values of the golden sweep.
 - **The golden gate** (0.6.0). `tests/tcyr/golden.tcyr` holds every
   public forward op to the committed `tests/golden/x86_64.txt` or
-  `tests/golden/aarch64.txt`: 9,969 raw bit patterns per target. CI runs it on
-  both targets, aarch64 under qemu. A change that moves any bit fails there,
+  `tests/golden/aarch64.txt`: 11,550 raw bit patterns per target in 20 cases
+  (0.6.1 appended `ru_gelu_fwd_t`'s output). CI runs it on both targets,
+  aarch64 under qemu. A change that moves any bit fails there,
   with the case, the value and both patterns named, until it is reviewed,
   re-blessed with `make golden-bless`, and noted in the CHANGELOG.
 - **Across cyrius pins:** cyrius **6.6.13** replaced `f64_tanh` (ganita
