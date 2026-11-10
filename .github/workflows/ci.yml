@@ -126,6 +126,55 @@ jobs:
         # Informational (CI hosts are noisy); scripts/bench-history.sh records numbers.
         run: CYRIUS_DCE=1 cyrius bench tests/rupantara.bcyr
 
+  aarch64:
+    name: Test on aarch64 (qemu)
+    # Every suite cross-built for aarch64 and run under qemu-user. The golden gate
+    # (tests/tcyr/golden.tcyr) compares against tests/golden/aarch64.txt here: aarch64
+    # fuses the packed multiply-add (FMLA), so its bits are pinned by their own file.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Install qemu-user
+        # The cross-built binaries are static ELFs, so either form runs them.
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+          QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+          [ -n "$QEMU" ] || { echo "no qemu-aarch64 binary after installing qemu-user"; exit 1; }
+          "$QEMU" --version | head -1
+          echo "QEMU=$QEMU" >> "$GITHUB_ENV"
+
+      - name: Resolve dependencies
+        run: |
+          rm -rf lib
+          mkdir lib
+          cyrius deps
+
+      - name: Cross-build + run every suite on aarch64
+        # Run from the repository root: the golden gate reads tests/golden/aarch64.txt.
+        run: |
+          set -e
+          mkdir -p build
+          for f in tests/tcyr/*.tcyr; do
+            n=$(basename "$f" .tcyr)
+            cyrius build --aarch64 "$f" "build/${n}_a64"
+            echo "== $n"
+            "$QEMU" "build/${n}_a64"
+          done
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest

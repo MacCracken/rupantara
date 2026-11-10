@@ -2,7 +2,7 @@
 # / softmax leaf checks + the block-stack ru_model_fwd (plumbing parity + softmax).
 include "src/lib.cyr"
 include "lib/assert.cyr"
-include "tests/common.cyr"     # f64_close, tol_*
+include "tests/common.cyr"     # f64_close, tol_*, fill_det, bits_diff, sentinels
 
 # set n consecutive f64 slots at p+off*8 to f64_from(1)
 fn _fill_ones(p, off, n): i64 {
@@ -181,6 +181,62 @@ fn test_model_attention_contributes() {
     return 0;
 }
 
+# ru_model_fwd_n / _n_s (0.6.0) at every run length n = 1..T: rows 0..n-1 bit-identical
+# to ru_model_fwd over the whole window (the ids past n differ, and are never read), on
+# one dirty scratch block reused for every n, and the rows past n left untouched.
+fn _fwd_n_case(V, C, T, nh, nkv, NL, F, bias, name): i64 {
+    var cfg = t_alloc(8);
+    ru_cfg_init(cfg, V, C, T, nh, nkv, NL, F, bias);
+    var np = ru_params_count(cfg);
+    var params = t_alloc(np);
+    fill_det(params, np, 7);
+    var tok = t_alloc(T);
+    var i = 0;
+    while (i < T) { store64(tok + i * 8, (i * 3 + 1) % V); i = i + 1; }
+    var lf = t_alloc(T * V);
+    var pf = t_alloc(T * V);
+    ru_model_fwd(cfg, params, tok, lf, pf);
+    var ns = ru_model_scratch_count(cfg);
+    var sc = t_alloc(ns);
+    fill_dirty(sc, ns);
+    var tn = t_alloc(T);
+    var rcs = 0;
+    var diffs = 0;
+    var past = 0;
+    var n = 1;
+    while (n <= T) {
+        i = 0;
+        while (i < T) {
+            var id = load64(tok + i * 8);
+            if (i >= n) { id = (id + 1 + i) % V; }
+            store64(tn + i * 8, id);
+            i = i + 1;
+        }
+        var l1 = t_alloc(T * V);
+        var p1 = t_alloc(T * V);
+        fill_sentinel(l1, T * V);
+        fill_sentinel(p1, T * V);
+        rcs = rcs + ru_model_fwd_n_s(cfg, params, tn, n, l1, p1, sc);
+        diffs = diffs + bits_diff(l1, lf, n * V) + bits_diff(p1, pf, n * V);
+        past = past + 2 - sentinel_intact(l1 + n * V * 8, (T - n) * V) - sentinel_intact(p1 + n * V * 8, (T - n) * V);
+        var l2 = t_alloc(T * V);
+        rcs = rcs + ru_model_fwd_n(cfg, params, tn, n, l2, 0);
+        diffs = diffs + bits_diff(l2, lf, n * V);
+        n = n + 1;
+    }
+    assert_eq(rcs, 0, name);
+    assert_eq(diffs, 0, name);
+    assert_eq(past, 0, name);
+    return 0;
+}
+
+fn test_model_fwd_n() {
+    _fwd_n_case(9, 8, 5, 2, 2, 2, 32, 1, "ru_model_fwd_n rows == ru_model_fwd rows (MHA + bias)");
+    _fwd_n_case(7, 12, 6, 4, 2, 3, 48, 0, "ru_model_fwd_n rows == ru_model_fwd rows (GQA, 3 blocks)");
+    _fwd_n_case(11, 20, 7, 4, 1, 2, 30, 1, "ru_model_fwd_n rows == ru_model_fwd rows (MQA, hd 5)");
+    return 0;
+}
+
 # runs the suite; the exit code is the failure count
 fn main(): i64 {
     alloc_init();
@@ -190,6 +246,7 @@ fn main(): i64 {
     test_softmax_fwd();
     test_model_passthrough();
     test_model_attention_contributes();
+    test_model_fwd_n();
     return assert_summary();
 }
 

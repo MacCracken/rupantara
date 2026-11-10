@@ -4,6 +4,8 @@
 #   - every rejected model / decode / attention call returns its code and writes
 #     NOTHING (outputs pre-filled with a sentinel stay intact) — including the KV cache
 #     on a decode past the window, which through 0.5.1 wrote past the cache;
+#   - ru_model_fwd_n / _n_s (0.6.0) reject a run length outside [1, T] and check only
+#     the ids inside it;
 #   - ru_model_fwd_s / ru_model_fwd_row_s, on dirty reused scratch, equal the
 #     allocating entries bit for bit;
 #   - ru_argmax's tie / NaN / empty-row rules; ru_softmax_fwd at large logits.
@@ -27,6 +29,10 @@ fn test_cfg_accepts(): i64 {
     assert_eq(ru_cfg_check(_cfg(5, 6, 3, 3, 3, 0, 8, 0)), RU_OK(), "cfg ok: NL = 0");
     assert_eq(ru_cfg_check(_cfg(1, 1, 1, 1, 1, 1, 1, 0)), RU_OK(), "cfg ok: every dim 1");
     assert_eq(ru_cfg_check(_cfg(50257, 768, 1024, 12, 12, 12, 3072, 1)), RU_OK(), "cfg ok: GPT-2 small");
+    # 0.6.0: the model forward no longer sizes the nh*T*T probabilities, so a config whose
+    # only oversize buffer was that one passes; ru_attn_arena_size (ru_block_fwd's full
+    # arena) still refuses it, in test_sizes.
+    assert_eq(ru_cfg_check(_cfg(2, 1024, 1073741824, 1024, 1, 1, 1, 0)), RU_OK(), "cfg ok: nh*T*T past 2^56");
     return 0;
 }
 
@@ -47,7 +53,8 @@ fn test_cfg_rejects(): i64 {
     assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 2, 2, 32, -1)), RU_ERR_CFG(), "cfg rejects: attn_bias = -1");
     # sizes past 2^56 elements: each would have wrapped an i64 byte count somewhere
     assert_eq(ru_cfg_check(_cfg(1099511627776, 1048576, 1, 1, 1, 1, 1, 0)), RU_ERR_CFG(), "cfg rejects: V*C overflow");
-    assert_eq(ru_cfg_check(_cfg(2, 1024, 1073741824, 1024, 1, 1, 1, 0)), RU_ERR_CFG(), "cfg rejects: nh*T*T overflow");
+    assert_eq(ru_cfg_check(_cfg(2, 2, 1099511627776, 1, 1, 1, 1048576, 0)), RU_ERR_CFG(),
+      "cfg rejects: forward scratch (2*T*F) overflow");
     assert_eq(ru_cfg_check(_cfg(2, 2, 2, 1, 1, 1, 9223372036854775807, 0)), RU_ERR_CFG(), "cfg rejects: C*F overflow");
     assert_eq(ru_cfg_check(_cfg(9, 8, 5, 2, 2, 4611686018427387904, 32, 0)), RU_ERR_CFG(),
       "cfg rejects: NL*blk overflow");
@@ -64,9 +71,16 @@ fn test_sizes(): i64 {
     var cq = _cfg(7, 12, 6, 4, 2, 3, 48, 0);           # Ckv = 2 * 3 = 6
     assert_eq(ru_decode_kv_count(cq), 2 * 3 * 6 * 6, "ru_decode_kv_count = 2*NL*T*Ckv");
     assert_eq(ru_attn_arena_size(6, 12, 4, 2), 2 * 6 * 12 + 2 * 6 * 6 + 4 * 6 * 6, "ru_attn_arena_size (GQA)");
-    assert_eq(ru_model_scratch_count(cq), 6 * 72 + 2 * 288 + 36 + ru_attn_arena_size(6, 12, 4, 2),
+    # 6TC + 2TF + 6T + the lean arena 2TC + 2T*Ckv + T (0.6.0: no nh*T*T)
+    assert_eq(ru_model_scratch_count(cq), 6 * 72 + 2 * 288 + 36 + (2 * 72 + 2 * 36 + 6),
       "ru_model_scratch_count");
     assert_eq(ru_decode_scratch_count(cq), 8 * 12 + 2 * 48 + 6 + 6, "ru_decode_scratch_count");
+    # 0.6.0: at GPT-2-small widths and T = 8192 the forward scratch is 0.84 GiB (6.84 GiB
+    # through 0.5.3, 6.0 of it nh*T*T probabilities): one allocation under the 2 GiB cap
+    var g8k = ru_model_scratch_count(_cfg(50257, 768, 8192, 12, 12, 12, 3072, 1));
+    assert_eq(g8k, 6 * 8192 * 768 + 2 * 8192 * 3072 + 6 * 8192 + (4 * 8192 * 768 + 8192),
+      "ru_model_scratch_count at GPT-2 widths, T = 8192");
+    assert_lt(g8k * 8, 2147483648, "the GPT-2-width scratch at T = 8192 fits one allocation");
     var bad = _cfg(9, 10, 5, 4, 4, 2, 32, 0);
     assert_eq(ru_params_count(bad), RU_ERR_CFG(), "ru_params_count -1 on a bad cfg");
     assert_eq(ru_decode_kv_count(bad), RU_ERR_CFG(), "ru_decode_kv_count -1 on a bad cfg");
@@ -117,6 +131,64 @@ fn test_model_rejects(): i64 {
     assert_eq(ru_model_fwd_s(g_cfg, g_par, g_tok, lg, pr, sc), RU_ERR_TOKEN(), "ru_model_fwd_s: bad token rejected");
     store64(g_tok, 0);
     assert_eq(sentinel_intact(lg, T * V) + sentinel_intact(pr, T * V), 2, "rejected forwards wrote no logits / probs");
+    return 0;
+}
+
+# ru_model_fwd_n / _n_s (0.6.0): each rejection's code and no logits or probs written;
+# an id past the run length is never read, so it is not an error.
+fn test_model_n_rejects(): i64 {
+    _model(9, 8, 5, 2, 2, 2, 32, 1, 3);
+    var V = 9; var T = 5;
+    var lg = t_alloc(T * V);
+    var pr = t_alloc(T * V);
+    fill_sentinel(lg, T * V);
+    fill_sentinel(pr, T * V);
+    var sc = t_alloc(ru_model_scratch_count(g_cfg));
+    assert_eq(ru_model_fwd_n(g_cfg, g_par, g_tok, 0, lg, pr), RU_ERR_ARG(), "ru_model_fwd_n: n = 0 rejected");
+    assert_eq(ru_model_fwd_n(g_cfg, g_par, g_tok, -3, lg, pr), RU_ERR_ARG(), "ru_model_fwd_n: n < 0 rejected");
+    assert_eq(ru_model_fwd_n(g_cfg, g_par, g_tok, T + 1, lg, pr), RU_ERR_POS(),
+      "ru_model_fwd_n: n = T + 1 rejected");
+    assert_eq(ru_model_fwd_n_s(g_cfg, g_par, g_tok, T + 1, lg, pr, sc), RU_ERR_POS(),
+      "ru_model_fwd_n_s: n = T + 1 rejected");
+    assert_eq(ru_model_fwd_n_s(g_cfg, g_par, g_tok, 3, lg, pr, 0), RU_ERR_ARG(),
+      "ru_model_fwd_n_s: null scratch rejected");
+    assert_eq(ru_model_fwd_n(0, g_par, g_tok, 3, lg, pr), RU_ERR_CFG(), "ru_model_fwd_n: null cfg rejected");
+    assert_eq(ru_model_fwd_n(g_cfg, 0, g_tok, 3, lg, pr), RU_ERR_ARG(), "ru_model_fwd_n: null params rejected");
+    assert_eq(ru_model_fwd(0, g_par, g_tok, lg, pr), RU_ERR_CFG(), "ru_model_fwd: null cfg rejected");
+    assert_eq(ru_model_fwd_s(0, g_par, g_tok, lg, pr, sc), RU_ERR_CFG(), "ru_model_fwd_s: null cfg rejected");
+    store64(g_tok + 2 * 8, V);                          # an id past the vocab at position 2
+    assert_eq(ru_model_fwd_n(g_cfg, g_par, g_tok, 3, lg, pr), RU_ERR_TOKEN(),
+      "ru_model_fwd_n: an id inside n checked");
+    assert_eq(sentinel_intact(lg, T * V) + sentinel_intact(pr, T * V), 2,
+      "rejected variable-length forwards wrote no logits / probs");
+    assert_eq(ru_model_fwd_n_s(g_cfg, g_par, g_tok, 2, lg, pr, sc), RU_OK(),
+      "ru_model_fwd_n_s: an id past n is not read");
+    store64(g_tok + 2 * 8, 2);
+    return 0;
+}
+
+# An n-row run touches only the n-row prefix of its scratch (_ru_model_scratch_n(cfg, n)
+# elements): that prefix is all the allocating ru_model_fwd_n allocates, so an op that ran
+# over T rows instead of n would write past its block. The rest keeps its sentinel. A
+# long window over a narrow MLP (T = 24, F = 4), so that any T-row write — the embedding's
+# x, the final LN's af — runs past the prefix at small n.
+fn test_model_n_scratch_prefix(): i64 {
+    _model(9, 8, 24, 2, 2, 2, 4, 1, 4);
+    var V = 9;
+    var T = 24;
+    var ns = ru_model_scratch_count(g_cfg);
+    var sc = t_alloc(ns);
+    var lg = t_alloc(T * V);
+    var bad = 0;
+    var n = 1;
+    while (n <= T) {
+        fill_sentinel(sc, ns);
+        ru_model_fwd_n_s(g_cfg, g_par, g_tok, n, lg, lg, sc);
+        var used = _ru_model_scratch_n(g_cfg, n);
+        if (sentinel_intact(sc + used * 8, ns - used) == 0) { bad = bad + 1; }
+        n = n + 1;
+    }
+    assert_eq(bad, 0, "ru_model_fwd_n_s writes only the n-row prefix of its scratch");
     return 0;
 }
 
@@ -250,6 +322,8 @@ fn main(): i64 {
     test_cfg_rejects();
     test_sizes();
     test_model_rejects();
+    test_model_n_rejects();
+    test_model_n_scratch_prefix();
     test_model_scratch_bits();
     test_decode_rejects();
     test_decode_scratch_bits();

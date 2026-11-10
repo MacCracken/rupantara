@@ -7,7 +7,7 @@
 > training, not tensors, not the importer. Pre-1.0: surface may move, no freeze
 > until v1.0.
 
-## Where it stands (0.5.2)
+## Where it stands (0.6.0)
 
 The GPT-2-shaped forward and KV-cache decode are done. That covers MHA/GQA/MQA
 attention, the GELU MLP, LayerNorm, learned positions and the weight-tied head.
@@ -16,6 +16,16 @@ checks it, and attn11's leaf ops run through rupantara.
 
 The model entries validate their input, and allocation-free caller-scratch
 entries exist. A fuzz harness, benchmarks and a security audit are in place.
+
+0.6.0 shipped the rupantara side of 0.6.x:
+
+- the committed golden gate, with an aarch64 CI job;
+- the variable-length forward;
+- the lean model scratch;
+- GPT-2-small throughput.
+
+Both consumers are on cyrius 6.7.18, rosnet 1.4.1 and rupantara 0.5.3; moving
+them to 0.6.0 is the remaining 0.6.x work.
 Completed work is recorded in `CHANGELOG.md` and `docs/development/state.md`,
 not here.
 
@@ -23,8 +33,8 @@ not here.
 
 ## Working agreement
 
-- **Build/test:** `make build` · `make test` · `make fuzz` · `make bench` ·
-  `make dist`. The pin is in `cyrius.cyml`.
+- **Build/test:** `make build` · `make test` · `make test-aarch64` (qemu) ·
+  `make fuzz` · `make bench` · `make dist`. The pin is in `cyrius.cyml`.
 - **Flat modules:** stdlib includes only in `src/lib.cyr`; `src/*.cyr` flat. New
   module → `src/lib.cyr` + `cyrius.cyml [lib].modules` (dep order). The LSP flags
   cross-module symbols as "undefined" in standalone files — flat-module pattern;
@@ -44,8 +54,10 @@ not here.
   parity with attn11's forward**. Any op ported from attn11 must reproduce
   attn11's numbers.
 - **Optimizations keep every output bit-identical** (ADR 0002). Gate a kernel
-  change with the oracles in `tests/reference.cyr` and a before/after golden
-  dump on x86_64 and aarch64.
+  change with the oracles in `tests/reference.cyr` and the committed golden
+  gate (`tests/tcyr/golden.tcyr`; `make test` and `make test-aarch64`).
+  Re-bless it (`make golden-bless`) only for a reviewed numerical change that
+  the CHANGELOG names.
 - **Model entries validate, leaf kernels trust** (ADR 0003). New entries return
   `RU_ERR_*` and write nothing on a rejection.
 
@@ -54,51 +66,22 @@ not here.
 ## 0.6.x — consumers on real models
 
 **Goal:** anukūlana runs a real GPT-2 through rupantara end to end, at any run
-length, and both consumers are on a current rupantara.
+length, on a current rupantara.
 
-- **A committed golden-dump gate (first, because it guards the rest).** Today's
-  golden dumps are ad hoc: 6,742 raw f64 bit patterns over every public forward
-  op. Commit one file per target (x86_64, aarch64) and a suite that compares
-  against it. A change that moves a bit then fails until it is reviewed and
-  re-blessed with a CHANGELOG note. This gate would have caught cyrius 6.6.13's
-  `f64_tanh` change at the 0.4.4 pin bump.
-- **Variable-length forward: `ru_model_fwd_n` / `ru_model_fwd_n_s`.** Run
-  `n <= T` tokens without repacking. `T` stays the layout's context (the
-  `pos_emb` size), and `n` is the run length.
-  - Today `ru_model_fwd` always runs `T` tokens. anukūlana's
-    `anuk_gpt2_import` overrides `T` to the run length and repacks the whole
-    parameter buffer (about 1 GB for GPT-2 small) for every run length.
-  - **Acceptance:** rows `0..n-1` are bit-identical to `ru_model_fwd` on a
-    padded window. Fuzz covers it.
-- **A memory-lean batch forward.** `ru_model_fwd(_s)` sizes its scratch for the
-  attention probabilities of the whole window (`nh·T·T` f64). The model forward
-  never reads them again. At GPT-2-small widths the scratch is 0.20 GiB at
-  T = 1024, 1.92 GiB at T = 4096, and 6.84 GiB at T = 8192. The last is past
-  the allocator's 2 GiB per-allocation cap; 6.0 GiB of it is probabilities.
-  - **The change:** run the shared `_ru_attn_qrow` with one T-element row
-    instead. The scratch becomes 0.84 GiB at T = 8192, and the outputs stay
-    bit-identical (same routine, same order).
-  - `ru_attn_core_fwd` keeps writing the full `Pc`, because attn11's backward
-    reads it.
-- **GPT-2-scale throughput.** Add tokens/s for the batch forward and a decode
-  step at GPT-2-small dims (C = 768, 12 layers, V = 50257, T = 1024) to
-  `tests/rupantara.bcyr` and `docs/benchmarks.md`. Synthetic weights suffice:
-  values do not change the time.
+The rupantara side shipped in 0.6.0. What remains is cross-repo:
+
 - **⚠ Cross-repo, anukūlana:**
-  - move its decode loop (`src/main.cyr`) onto `ru_model_fwd_row_s`, since it
-    allocates about 107 KB per token today;
-  - drop the run-length repack once `ru_model_fwd_n` lands;
-  - check the `RU_ERR_*` returns;
-  - move `[deps.rupantara]` off 0.4.2.
-- **⚠ Cross-repo, attn11:**
-  - move it off cyrius 6.6.2, rosnet 1.1.2 and rupantara 0.4.2;
-  - re-run `test_rupantara_parity` and the 1,049 gradient checks at the new pin.
-
-  attn11's own GELU outputs will move by up to 2 ulp from the 6.6.13 `tanh`
-  change. The parity diff should stay 0, because both sides are built with one
-  toolchain.
-- **Acceptance:** anukūlana's GPT-2 fidelity gate is green through rupantara
-  (the v1.0 consumer criterion), and attn11 is green on a current rupantara.
+  - drop the run-length repack. `anuk_gpt2_import` overrides `T` to the run
+    length and packs a fresh ~1 GB parameter buffer for each length. It can
+    import once at the file's `T` (1024) and call `ru_model_fwd_n(_s)` with
+    any `n`;
+  - move `[deps.rupantara]` to 0.6.0.
+- **⚠ Cross-repo, attn11:** move `[deps.rupantara]` to 0.6.0 and re-run its
+  suite. It passed 1,089/1,089, `test_rupantara_parity` included, built against
+  the 0.6.0 bundle on 2026-11-09.
+- **Acceptance:** anukūlana's GPT-2 fidelity gate (`make fidelity`,
+  `gpt2-oracle`, its 1.3.x item) is green through rupantara on the
+  maintainer's machine. That is the v1.0 consumer criterion.
 
 ## 0.7.x — the API shape the freeze will lock
 
@@ -184,10 +167,16 @@ Llama-class model).
 
 ### Performance under the bit contract
 
+- **Scratch alignment.** In the 0.6 A/B, moving the model forward's scratch
+  block between 0 and 24 bytes off a 64-byte boundary moved its time by up to
+  ±5%, more than the lean change itself. The allocating entries could align
+  their own block, and the `_s` docs could ask callers to. Alignment changes no
+  arithmetic, so no bits move.
 - **The scores and LM-head dots.** Both are 4-lane `f64v_fmadd` chains. No
   ordering-preserving way to pack them was found in 0.5.2.
-- **AVX2.** It needs a runtime CPU check and a new stdlib leaf in the bundle.
-  Rounding would be unchanged.
+- **AVX2 in rupantara's own kernels.** rosnet 1.4.1's `linear_fwd` already has
+  an unfused AVX2 path, through a runtime CPU check and the stdlib `simd` leaf.
+  The attention and head dots could follow if their 4-lane order is kept.
 - **A faster GELU `tanh`.** It would change bits, so it needs an explicit
   parity-policy decision with attn11 first.
 

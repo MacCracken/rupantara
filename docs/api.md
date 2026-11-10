@@ -1,4 +1,4 @@
-# rupantara API (0.5.2)
+# rupantara API (0.6.0)
 
 The transformer **forward**: f64, CPU, pure Cyrius. Consumers import
 `dist/rupantara.cyr` through `[deps.rupantara]` and must also declare
@@ -21,13 +21,13 @@ Pre-1.0: the surface may still move. Nothing here is frozen until v1.0.
 | `0` | `RU_OK()` | success |
 | `-1` | `RU_ERR_CFG()` | a malformed config (see `ru_cfg_check`) or a shape the kernels cannot index |
 | `-2` | `RU_ERR_TOKEN()` | a token id outside `[0, V)` |
-| `-3` | `RU_ERR_POS()` | a decode position outside `[0, T)` |
-| `-4` | `RU_ERR_ARG()` | an unsupported option or a 0 pointer |
+| `-3` | `RU_ERR_POS()` | a decode position outside `[0, T)`, or a run length `n > T` |
+| `-4` | `RU_ERR_ARG()` | an unsupported option, a run length `n < 1`, or a 0 pointer |
 
 **Validated entries** check their arguments and return a code with every
 output untouched (the KV cache included) on failure. They are `ru_model_fwd`,
-`ru_model_fwd_s`, `ru_model_fwd_row`, `ru_model_fwd_row_s`, `ru_attn_fwd`,
-`ru_argmax`, and the sizing functions.
+`ru_model_fwd_s`, `ru_model_fwd_n`, `ru_model_fwd_n_s`, `ru_model_fwd_row`,
+`ru_model_fwd_row_s`, `ru_attn_fwd`, `ru_argmax`, and the sizing functions.
 
 **Leaf kernels** take dims and buffers on trust, as rosnet's kernels do. They
 run no checks, so the inner loops pay nothing. They are `ru_ln_fwd`,
@@ -62,13 +62,22 @@ Each function returns an element count, or `RU_ERR_CFG` (-1) for a config
 | Function | Buffer |
 |---|---|
 | `ru_params_count(cfg)` | the packed parameters |
-| `ru_model_scratch_count(cfg)` | scratch for `ru_model_fwd_s` |
+| `ru_model_scratch_count(cfg)` | scratch for `ru_model_fwd_s`, and for `ru_model_fwd_n_s` at any `n <= T` |
 | `ru_decode_kv_count(cfg)` | the KV cache: `2 * NL * T * Ckv`, with `Ckv = nkv * hd` |
 | `ru_decode_scratch_count(cfg)` | scratch for `ru_model_fwd_row_s` |
 | `ru_attn_arena_size(T, C, nh, nkv)` | the arena for `ru_attn_fwd` |
 
 The caller also owns the outputs: `logits` and `probs` hold `(T, V)` for the
-batch forward and `(V)` for one decode step.
+batch forward, `(n, V)` for a run of `n` tokens, and `(V)` for one decode step.
+
+**The model scratch holds no attention probabilities** (0.6.0). The model
+forward runs each (head, query row) pair through one reused T-element
+probability row instead of an `nh·T·T` buffer, which it never read again. At
+GPT-2-small widths (C = 768, 12 heads, F = 3072) the scratch is 0.106 GiB at
+T = 1024, 0.42 GiB at T = 4096 and 0.84 GiB at T = 8192, against 0.20, 1.92 and
+6.84 GiB through 0.5.3. The outputs are bit-identical. `ru_attn_fwd`,
+`ru_attn_core_fwd` and `ru_block_fwd` still fill their full `Pc`, because
+attn11's backward reads it.
 
 ## The forward
 
@@ -76,6 +85,8 @@ batch forward and `(V)` for one decode step.
 |---|---|
 | `ru_model_fwd(cfg, params, tokens, logits, probs)` | `tokens(T)` → `logits(T,V)`, and `probs(T,V)` unless `probs` is 0. **Allocates** its scratch on every call (see below). |
 | `ru_model_fwd_s(cfg, params, tokens, logits, probs, scratch)` | The same on caller scratch, with no allocation. Bit-identical. |
+| `ru_model_fwd_n(cfg, params, tokens, n, logits, probs)` | The first `n` positions only, `1 <= n <= T`: `tokens(n)` → `logits(n,V)`, and `probs(n,V)` unless `probs` is 0. Rows bit-identical to `ru_model_fwd`'s. **Allocates** scratch for `n` rows. (0.6.0) |
+| `ru_model_fwd_n_s(cfg, params, tokens, n, logits, probs, scratch)` | The same on caller scratch (`ru_model_scratch_count`, enough for any `n`). Bit-identical. (0.6.0) |
 | `ru_model_fwd_row(cfg, params, tok, pos, kv, logits)` | One decode step: `tok` at position `pos` reads the KV cache for `0..pos-1`, appends its own K/V, and writes `logits(V)`. **Allocates**. |
 | `ru_model_fwd_row_s(cfg, params, tok, pos, kv, logits, scratch)` | The same on caller scratch. Bit-identical. |
 | `ru_argmax(logits, V)` | Greedy next token. A tie goes to the lowest index. A NaN past index 0 never wins, and a NaN at index 0 stays the answer. Returns `RU_ERR_ARG` for `V < 1`. |
@@ -91,9 +102,14 @@ clearing: every slot is written before it is read.
 `ru_model_fwd` and the cached step at `pos` are bit-identical. A position at or
 past `T` returns `RU_ERR_POS`. Through 0.5.1 it wrote past the KV cache.
 
-**Prompts shorter than T.** `ru_model_fwd` always runs `T` tokens. Pad the
-window with any valid id. Attention is causal, so logits rows `0..n-1` do not
-depend on the padding.
+**Prompts shorter than T.** Call `ru_model_fwd_n(_s)` with the prompt length
+`n`. It runs positions `0..n-1` only, writes `n` rows, and reads and checks only
+the first `n` ids. Its rows are bit-identical to rows `0..n-1` of
+`ru_model_fwd` over the same tokens padded to `T` with any valid ids, because
+attention is causal. One parameter buffer, laid out for the context `T` (the
+`pos_emb` rows), serves every run length, so there is no need to repack it per
+length. Through 0.5.3 the only way was to pad the window and pay for all `T`
+rows.
 
 ## Packed parameter layout
 
@@ -138,7 +154,7 @@ they are part of the layout contract and will not be renamed before v1.0.
 | `ru_embed_fwd(tokens, tok_emb, pos_emb, x0, n, C)` | `x0[t] = tok_emb[tokens[t]] + pos_emb[t]` |
 | `ru_head_fwd_row(f_row, tok_emb, logits_row, C, V)` / `ru_head_fwd(f, tok_emb, logits, n, C, V)` | The weight-tied head. |
 | `ru_softmax_fwd(logits, probs, M, V)` | Row softmax, max-subtracted. `probs` may alias `logits`. |
-| `ru_block_fwd(cfg, pblk, xin, xout, …, arena)` | One pre-norm block. Safe in place. |
+| `ru_block_fwd(cfg, pblk, xin, xout, …, arena)` | One pre-norm block over `T` rows. Safe in place. `arena` holds `ru_attn_arena_size(T, C, nh, nkv)`, and its `Pc` holds the block's probabilities afterwards. |
 | `linear_fwd_gpu(x, W, b, y, M, K, N)` | `linear_fwd` on the AGNOS GPU (#83), in 8×8×8 tiles when K ≤ 8 and b = 0, otherwise on the CPU. Bit-identical on x86_64. On aarch64, a ragged last tile's final `N % 4` columns can differ by the fused-FMLA rounding. Returns the tile count. **Not reentrant.** |
 | `rupantara_version()` | `major*10000 + minor*100 + patch` (0.5.2 → 502) |
 
@@ -150,7 +166,15 @@ they are part of the layout contract and will not be renamed before v1.0.
   compiles both sides in one binary with one toolchain.
 - **x86_64 against aarch64:** not bit-identical. cyrius fuses the packed
   multiply-add on aarch64 (FMLA), and on x86_64 it is `mulpd` then `addpd`.
-  The attention dot products and rosnet's `linear_fwd` inherit that.
+  The attention dot products and rosnet's `linear_fwd` inherit that. GELU
+  matches across the two targets over its whole range. Softmax's `f64_exp`
+  differs by at most 1 ulp, in 75 of 801 values of the golden sweep.
+- **The golden gate** (0.6.0). `tests/tcyr/golden.tcyr` holds every
+  public forward op to the committed `tests/golden/x86_64.txt` or
+  `tests/golden/aarch64.txt`: 9,969 raw bit patterns per target. CI runs it on
+  both targets, aarch64 under qemu. A change that moves any bit fails there,
+  with the case, the value and both patterns named, until it is reviewed,
+  re-blessed with `make golden-bless`, and noted in the CHANGELOG.
 - **Across cyrius pins:** cyrius **6.6.13** replaced `f64_tanh` (ganita
   1.2.11) with fdlibm's `expm1` form, an accuracy fix. GELU therefore differs
   by up to 2 ulp between builds on cyrius ≤ 6.6.12 and ≥ 6.6.13, and model

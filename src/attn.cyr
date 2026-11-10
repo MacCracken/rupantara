@@ -130,22 +130,30 @@ fn _ru_attn_qrow(qbase, Kc, Vc, prow, cbase, jhi, Ckv, kvb, hd, scale): i64 {
 # _ru_attn_qrow above. A leaf kernel: dims are trusted (C % nh == 0 and nh % nkv == 0
 # are the caller's — the model entries check them; see src/guard.cyr).
 fn ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
+    # zero the full probability buffer (upper triangle stays 0)
+    t_zero(Pc, nh * T * T);
+    return _ru_attn_core(Qc, Kc, Vc, Pc, 0, concat, T, C, nh, nkv);
+}
+
+# The batch core's loop: head h outer, query row i inner (one head's K/V slice stays
+# cache-resident across the rows), each pair _ru_attn_qrow. Pc != 0: pair (h, i) writes
+# its probabilities to Pc row (h*T + i) — ru_attn_core_fwd. Pc == 0: every pair reuses
+# the one T-element `prow` — the model forward's lean attention (0.6.0), which never
+# reads them again. concat is the same either way: the same routine on the same inputs.
+fn _ru_attn_core(Qc, Kc, Vc, Pc, prow, concat, T, C, nh, nkv): i64 {
     var hd = C / nh;
     var Ckv = nkv * hd;
     var gsz = nh / nkv;             # query heads per K/V head (GQA group size)
     var scale = f64_div(f64_from(1), f64_sqrt(f64_from(hd)));
-
-    # zero the full probability buffer (upper triangle stays 0)
-    t_zero(Pc, nh * T * T);
-
     var h = 0;
     while (h < nh) {
         var base = h * hd;          # this query head's block in Q/concat
         var kvb = (h / gsz) * hd;   # its shared K/V head's block in Kc/Vc
         var i = 0;
         while (i < T) {
-            _ru_attn_qrow(Qc + (i * C + base) * 8, Kc, Vc, Pc + (h * T + i) * T * 8,
-              concat + (i * C + base) * 8, i, Ckv, kvb, hd, scale);
+            var pr = prow;
+            if (Pc != 0) { pr = Pc + (h * T + i) * T * 8; }
+            _ru_attn_qrow(Qc + (i * C + base) * 8, Kc, Vc, pr, concat + (i * C + base) * 8, i, Ckv, kvb, hd, scale);
             i = i + 1;
         }
         h = h + 1;
@@ -175,6 +183,29 @@ fn ru_attn_fwd(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x, out, ar, T, C, nh, nkv, pos_ki
     linear_fwd(x, Wk, bk, Kc, T, C, Ckv);
     linear_fwd(x, Wv, bv, Vc, T, C, Ckv);
     ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv);
+    linear_fwd(concat, Wo, bo, out, T, C, C);
+    return 0;
+}
+
+# ---- the model forward's attention: no Pc (0.6.0) ------------------------------
+# ru_attn_fwd's projections, core and Wo over the lean arena (_ru_lean_arena_c:
+# Qc | Kc | Vc | prow (T) | concat), for the block-stack forward, which never reads the
+# probabilities again. Through 0.5.3 the model forward ran ru_attn_fwd, whose nh*T*T Pc
+# was most of its scratch (6.0 of 6.84 GiB at GPT-2-small widths and T = 8192, past the
+# 2 GiB per-allocation cap) and was zero-filled per block. The core is _ru_attn_core with
+# Pc = 0: ru_attn_core_fwd's loop with one probability row reused, so `out` is
+# bit-identical to ru_attn_fwd's. Dims trusted.
+fn _ru_attn_fwd_lean(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x, out, ar, T, C, nh, nkv): i64 {
+    var Ckv = nkv * (C / nh);
+    var Qc = ar;
+    var Kc = Qc + (T * C) * 8;
+    var Vc = Kc + (T * Ckv) * 8;
+    var prow = Vc + (T * Ckv) * 8;
+    var concat = prow + T * 8;
+    linear_fwd(x, Wq, bq, Qc, T, C, C);
+    linear_fwd(x, Wk, bk, Kc, T, C, Ckv);
+    linear_fwd(x, Wv, bv, Vc, T, C, Ckv);
+    _ru_attn_core(Qc, Kc, Vc, 0, prow, concat, T, C, nh, nkv);
     linear_fwd(concat, Wo, bo, out, T, C, C);
     return 0;
 }

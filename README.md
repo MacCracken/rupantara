@@ -27,7 +27,17 @@ and the weight-tied LM head + softmax. The op surface is `ru_*`-namespaced.
   `ru_model_fwd_row_s`);
 - attention 1.5× faster, bit-identical to 0.5.1.
 
-**164 assertions** pass, plus a 20,000-round fuzz harness and 12 benchmarks.
+0.6.0 adds:
+
+- a committed golden gate: every public op's raw bits, on x86_64 and aarch64;
+- the variable-length forward (`ru_model_fwd_n`, `ru_model_fwd_n_s`);
+- a model scratch with no attention probabilities: 0.84 GiB at GPT-2 widths and
+  T = 8192, down from 6.84;
+- GPT-2-small throughput: about 14 tokens/s prefill and 10 tokens/s decode on
+  one core (`docs/benchmarks.md`).
+
+**192 assertions** pass on x86_64 and aarch64, plus a 20,000-round fuzz harness
+and 14 benchmarks.
 Start with [`docs/api.md`](docs/api.md). See also
 [`docs/benchmarks.md`](docs/benchmarks.md), [`SECURITY.md`](SECURITY.md) and
 the [audit](docs/audit/2026-11-09-audit.md).
@@ -43,13 +53,14 @@ bit-identical** to attn11's `model_forward` on identical params
 per-layer K/V caches + `ru_argmax` greedy next-token. See
 [`docs/development/roadmap.md`](docs/development/roadmap.md) +
 [`docs/development/refold-plan.md`](docs/development/refold-plan.md). The Cyrius
-pin is in `cyrius.cyml` (6.7.18 as of 0.5.2).
+pin is in `cyrius.cyml` (6.7.18 as of 0.6.0).
 
 ## Build & test
 
 ```sh
 make build   # link-check the library (programs/smoke.cyr)
-make test    # tests/tcyr/*.tcyr
+make test    # tests/tcyr/*.tcyr (the golden gate among them)
+make test-aarch64  # every suite on aarch64, under qemu-aarch64
 make fuzz    # seeded property fuzzing (tests/rupantara.fcyr)
 make bench   # benchmarks (tests/rupantara.bcyr)
 make dist    # regenerate dist/rupantara.cyr

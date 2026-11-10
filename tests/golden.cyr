@@ -1,0 +1,353 @@
+# tests/golden.cyr — the golden gate's generator. Runs every public forward op at
+# fixed inputs and writes each output as its raw 64-bit pattern, 16 lowercase hex
+# digits per line, under an "@case" label line. tests/tcyr/golden.tcyr compares the
+# text with the committed tests/golden/<target>.txt line by line, so any change that
+# moves a single bit fails until it is reviewed and the file re-blessed
+# (`make golden-bless`, which sets RU_GOLDEN_BLESS=1). Integer results (a return code,
+# a parameter count, an argmax) are recorded the same way, as their 64-bit pattern.
+#
+# Coverage: the model forward and decode at six configs (MHA ± bias, GQA over three
+# blocks, MQA, odd widths, C = 64), and each kernel called directly — the attention
+# cores (Pc included: attn11's backward reads it), ru_attn_fwd and its row form, the
+# embedding, head and softmax, one block, LayerNorm, GELU (a [-10, 10] sweep as well,
+# so a tanh change anywhere on its range shows), the MLP, linear_fwd and
+# linear_fwd_gpu. Inputs come from fill_det (tests/common.cyr), never a PRNG.
+#
+# Included after src/lib.cyr and tests/common.cyr. Not a suite.
+
+var _gd_buf = 0;
+var _gd_len = 0;
+var _gd_cap = 0;
+var _gd_over = 0;           # 1 once a write would pass _gd_cap (the text is then incomplete)
+
+fn _gd_byte(c): i64 {
+    if (_gd_len >= _gd_cap) { _gd_over = 1; return 0; }
+    store8(_gd_buf + _gd_len, c);
+    _gd_len = _gd_len + 1;
+    return 0;
+}
+
+# One value: its 64-bit pattern as 16 hex digits and a newline.
+fn _gd_word(v): i64 {
+    var s = 60;
+    while (s >= 0) {
+        var nib = (v >> s) & 15;
+        if (nib < 10) { _gd_byte(48 + nib); } else { _gd_byte(87 + nib); }
+        s = s - 4;
+    }
+    _gd_byte(10);
+    return 0;
+}
+
+# n f64 (or i64) values from p.
+fn _gd_dump(p, n): i64 {
+    var i = 0;
+    while (i < n) { _gd_word(load64(p + i * 8)); i = i + 1; }
+    return 0;
+}
+
+# A text line: prefix byte, the NUL-terminated string s, a newline.
+fn _gd_line(prefix, s): i64 {
+    _gd_byte(prefix);
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) { _gd_byte(load8(s + i)); i = i + 1; }
+    _gd_byte(10);
+    return 0;
+}
+
+# ---- cases --------------------------------------------------------------------
+
+# The model forward and the cached decode for one config: the parameter count (the
+# layout contract), logits(T,V) and probs(T,V) of ru_model_fwd, then each decode
+# step's logits(V) and its argmax.
+fn _gd_model(V, C, T, nh, nkv, NL, F, bias, name): i64 {
+    _gd_line(64, name);
+    var cfg = t_alloc(8);
+    ru_cfg_init(cfg, V, C, T, nh, nkv, NL, F, bias);
+    var np = ru_params_count(cfg);
+    _gd_word(np);
+    var params = t_alloc(np);
+    fill_det(params, np, 0);
+    var tokens = t_alloc(T);
+    var i = 0;
+    while (i < T) { store64(tokens + i * 8, (i * 3 + 1) % V); i = i + 1; }
+    var logits = t_alloc(T * V);
+    var probs = t_alloc(T * V);
+    _gd_word(ru_model_fwd(cfg, params, tokens, logits, probs));
+    _gd_dump(logits, T * V);
+    _gd_dump(probs, T * V);
+    var kv = t_alloc(ru_decode_kv_count(cfg));
+    var row = t_alloc(V);
+    var pos = 0;
+    while (pos < T) {
+        _gd_word(ru_model_fwd_row(cfg, params, load64(tokens + pos * 8), pos, kv, row));
+        _gd_dump(row, V);
+        _gd_word(ru_argmax(row, V));
+        pos = pos + 1;
+    }
+    return 0;
+}
+
+# The attention cores on fixed Q/K/V: ru_attn_core_fwd's Pc(nh,T,T) and concat(T,C),
+# then ru_attn_core_fwd_row at each position against the same caches (its prow holds
+# the last head's probabilities, pos + 1 of them).
+fn _gd_attn_core(T, C, nh, nkv, name): i64 {
+    _gd_line(64, name);
+    var Ckv = nkv * (C / nh);
+    var Qc = t_alloc(T * C); fill_det(Qc, T * C, 21);
+    var Kc = t_alloc(T * Ckv); fill_det(Kc, T * Ckv, 23);
+    var Vc = t_alloc(T * Ckv); fill_det(Vc, T * Ckv, 29);
+    var Pc = t_alloc(nh * T * T);
+    var concat = t_alloc(T * C);
+    ru_attn_core_fwd(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv);
+    _gd_dump(Pc, nh * T * T);
+    _gd_dump(concat, T * C);
+    var prow = t_alloc(T);
+    var crow = t_alloc(C);
+    var pos = 0;
+    while (pos < T) {
+        ru_attn_core_fwd_row(Qc + pos * C * 8, Kc, Vc, prow, crow, pos, C, nh, nkv);
+        _gd_dump(prow, pos + 1);
+        _gd_dump(crow, C);
+        pos = pos + 1;
+    }
+    return 0;
+}
+
+# ru_attn_fwd (projections, core, Wo): its return code, out(T,C) and the arena's
+# Pc; then ru_attn_fwd_row at each position, building its own K/V cache.
+fn _gd_attn(T, C, nh, nkv, bias, name): i64 {
+    _gd_line(64, name);
+    var Ckv = nkv * (C / nh);
+    var Wq = t_alloc(C * C); fill_det(Wq, C * C, 31);
+    var Wk = t_alloc(C * Ckv); fill_det(Wk, C * Ckv, 37);
+    var Wv = t_alloc(C * Ckv); fill_det(Wv, C * Ckv, 41);
+    var Wo = t_alloc(C * C); fill_det(Wo, C * C, 43);
+    var bq = 0; var bk = 0; var bv = 0; var bo = 0;
+    if (bias == 1) {
+        bq = t_alloc(C); fill_det(bq, C, 47);
+        bk = t_alloc(Ckv); fill_det(bk, Ckv, 53);
+        bv = t_alloc(Ckv); fill_det(bv, Ckv, 59);
+        bo = t_alloc(C); fill_det(bo, C, 61);
+    }
+    var x = t_alloc(T * C); fill_det(x, T * C, 67);
+    var ar = t_alloc(ru_attn_arena_size(T, C, nh, nkv));
+    var out = t_alloc(T * C);
+    _gd_word(ru_attn_fwd(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x, out, ar, T, C, nh, nkv, 0));
+    _gd_dump(out, T * C);
+    _gd_dump(_ru_at_Pc(ar, T, C, Ckv), nh * T * T);
+    var Kc = t_alloc(T * Ckv);
+    var Vc = t_alloc(T * Ckv);
+    var prow = t_alloc(T);
+    var crow = t_alloc(C);
+    var qrow = t_alloc(C);
+    var orow = t_alloc(C);
+    var pos = 0;
+    while (pos < T) {
+        ru_attn_fwd_row(Wq, bq, Wk, bk, Wv, bv, Wo, bo, x + pos * C * 8, orow,
+          Kc, Vc, prow, crow, qrow, pos, C, nh, nkv);
+        _gd_dump(orow, C);
+        pos = pos + 1;
+    }
+    return 0;
+}
+
+# The embedding over n <= T tokens, the weight-tied head over those rows, the row
+# softmax and each row's argmax.
+fn _gd_embed_head(V, C, T, n, name): i64 {
+    _gd_line(64, name);
+    var tok_emb = t_alloc(V * C); fill_det(tok_emb, V * C, 71);
+    var pos_emb = t_alloc(T * C); fill_det(pos_emb, T * C, 73);
+    var tokens = t_alloc(n);
+    var i = 0;
+    while (i < n) { store64(tokens + i * 8, (i * 5 + 2) % V); i = i + 1; }
+    var x0 = t_alloc(n * C);
+    ru_embed_fwd(tokens, tok_emb, pos_emb, x0, n, C);
+    _gd_dump(x0, n * C);
+    var logits = t_alloc(n * V);
+    ru_head_fwd(x0, tok_emb, logits, n, C, V);
+    _gd_dump(logits, n * V);
+    var probs = t_alloc(n * V);
+    ru_softmax_fwd(logits, probs, n, V);
+    _gd_dump(probs, n * V);
+    var t = 0;
+    while (t < n) { _gd_word(ru_argmax(logits + t * V * 8, V)); t = t + 1; }
+    return 0;
+}
+
+# One pre-norm block (NL = 1 config) over a fixed input: xout(T,C).
+fn _gd_block(V, C, T, nh, nkv, F, bias, name): i64 {
+    _gd_line(64, name);
+    var cfg = t_alloc(8);
+    ru_cfg_init(cfg, V, C, T, nh, nkv, 1, F, bias);
+    var np = ru_params_count(cfg);
+    var params = t_alloc(np);
+    fill_det(params, np, 79);
+    var xin = t_alloc(T * C); fill_det(xin, T * C, 83);
+    var xout = t_alloc(T * C);
+    ru_block_fwd(cfg, params + _ru_blk_base(cfg, 0) * 8, xin, xout,
+      t_alloc(T * C), t_alloc(T * C), t_alloc(T * C), t_alloc(T * C),
+      t_alloc(T * F), t_alloc(T * F), t_alloc(T), t_alloc(T), t_alloc(T), t_alloc(T),
+      t_alloc(ru_attn_arena_size(T, C, nh, nkv)));
+    _gd_dump(xout, T * C);
+    return 0;
+}
+
+# The leaf kernels at (M, C, F): LayerNorm (y, mean, rstd), GELU, the MLP (fc, gg, y),
+# softmax over the MLP hidden, linear_fwd with a bias, and linear_fwd_gpu bias-free
+# (the CPU fallback off AGNOS).
+fn _gd_leaf(M, C, F, name): i64 {
+    _gd_line(64, name);
+    var x = t_alloc(M * C);
+    fill_det(x, M * C, 3);
+    var g = t_alloc(C); fill_det(g, C, 5);
+    var b = t_alloc(C); fill_det(b, C, 7);
+    var y = t_alloc(M * C);
+    var mean = t_alloc(M);
+    var rstd = t_alloc(M);
+    ru_ln_fwd(x, g, b, y, mean, rstd, M, C);
+    _gd_dump(y, M * C); _gd_dump(mean, M); _gd_dump(rstd, M);
+    var gy = t_alloc(M * C);
+    ru_gelu_fwd(x, gy, M * C);
+    _gd_dump(gy, M * C);
+    var Wfc = t_alloc(C * F); fill_det(Wfc, C * F, 11);
+    var bfc = t_alloc(F); fill_det(bfc, F, 13);
+    var Wp = t_alloc(F * C); fill_det(Wp, F * C, 17);
+    var bp = t_alloc(C); fill_det(bp, C, 19);
+    var fc = t_alloc(M * F);
+    var gg = t_alloc(M * F);
+    var my = t_alloc(M * C);
+    ru_mlp_fwd(x, Wfc, bfc, Wp, bp, fc, gg, my, M, C, F);
+    _gd_dump(fc, M * F); _gd_dump(gg, M * F); _gd_dump(my, M * C);
+    var pr = t_alloc(M * F);
+    ru_softmax_fwd(fc, pr, M, F);
+    _gd_dump(pr, M * F);
+    var ly = t_alloc(M * F);
+    linear_fwd(x, Wfc, bfc, ly, M, C, F);
+    _gd_dump(ly, M * F);
+    var z = t_alloc(F);
+    t_zero(z, F);
+    var gy2 = t_alloc(M * F);
+    linear_fwd_gpu(x, Wfc, z, gy2, M, C, F);
+    _gd_dump(gy2, M * F);
+    return 0;
+}
+
+# GELU and softmax over wide ranges: GELU at x = (i - 400) / 40, i in 0..800 (the
+# whole [-10, 10] span of tanh's argument and past both saturation points), and one
+# softmax row over logits (i - 400) / 8 (exp across [-100, 0] after the max shift).
+fn _gd_sweep(name): i64 {
+    _gd_line(64, name);
+    var n = 801;
+    var x = t_alloc(n);
+    var i = 0;
+    while (i < n) { store64(x + i * 8, f64_div(f64_from(i - 400), f64_from(40))); i = i + 1; }
+    var y = t_alloc(n);
+    ru_gelu_fwd(x, y, n);
+    _gd_dump(y, n);
+    i = 0;
+    while (i < n) { store64(x + i * 8, f64_div(f64_from(i - 400), f64_from(8))); i = i + 1; }
+    ru_softmax_fwd(x, y, 1, n);
+    _gd_dump(y, n);
+    return 0;
+}
+
+# Build the whole dump into a fresh buffer. Returns its length in bytes, or -1 if
+# the text outgrew the buffer.
+fn gold_build(target): i64 {
+    _gd_cap = 4194304;
+    _gd_buf = alloc(_gd_cap);
+    _gd_len = 0;
+    _gd_over = 0;
+    _gd_line(35, " rupantara golden dump (tests/golden.cyr). Re-bless with `make golden-bless`.");
+    _gd_line(35, target);       # " target <arch>": a build compared with the other arch's file fails
+    _gd_model(9, 8, 5, 2, 2, 2, 32, 0, "model mha-nobias");
+    _gd_model(9, 8, 5, 2, 2, 2, 32, 1, "model mha-bias");
+    _gd_model(7, 12, 6, 4, 2, 3, 48, 0, "model gqa-3blk");
+    _gd_model(9, 8, 4, 4, 1, 2, 32, 0, "model mqa");
+    _gd_model(37, 24, 7, 3, 3, 2, 96, 1, "model odd-v37-c24");
+    _gd_model(50, 64, 16, 4, 2, 2, 256, 1, "model c64-gqa");
+    _gd_attn_core(6, 8, 2, 2, "attn-core mha-hd4");
+    _gd_attn_core(7, 12, 4, 2, "attn-core gqa-hd3");
+    _gd_attn_core(5, 12, 2, 1, "attn-core mqa-hd6");
+    _gd_attn(5, 8, 2, 1, 0, "attn mqa-nobias");
+    _gd_attn(6, 12, 2, 2, 1, "attn mha-hd6-bias");
+    _gd_embed_head(11, 7, 6, 4, "embed-head c7-n4");
+    _gd_embed_head(13, 16, 5, 5, "embed-head c16-n5");
+    _gd_block(9, 12, 5, 4, 2, 40, 1, "block gqa-bias");
+    _gd_block(9, 10, 4, 2, 2, 24, 0, "block mha-hd5");
+    _gd_leaf(3, 7, 13, "leaf odd");
+    _gd_leaf(5, 8, 32, "leaf 8");
+    _gd_leaf(4, 33, 71, "leaf 33x71");
+    _gd_sweep("sweep gelu-softmax");
+    if (_gd_over == 1) { return 0 - 1; }
+    return _gd_len;
+}
+
+# ---- comparison ---------------------------------------------------------------
+
+fn _gd_out(s): i64 { sys_write(1, s, strlen(s)); return 0; }
+fn _gd_outn(p, n): i64 { sys_write(1, p, n); return 0; }
+
+# End of the line starting at i in buf (the index of its '\n', or len).
+fn _gd_eol(buf, len, i): i64 {
+    var j = i;
+    while (j < len && load8(buf + j) != 10) { j = j + 1; }
+    return j;
+}
+
+# Report one case's differences: its label, how many of its lines differ, and the first.
+fn _gd_report(label, lablen, nd, first, fe, fel, fg, fgl): i64 {
+    _gd_out("  golden: "); _gd_outn(label, lablen); _gd_out(": ");
+    fmt_int(nd); _gd_out(" line(s) differ; first at value #"); fmt_int(first);
+    _gd_out(": expected "); _gd_outn(fe, fel); _gd_out(", got "); _gd_outn(fg, fgl); _gd_out("\n");
+    return 0;
+}
+
+# Compare the generated text (got) with the committed file (exp) line by line.
+# Prints one report per case that differs and returns the number of differing lines;
+# a line present on one side only counts as one. '#' comment lines must match too
+# (they name the target, so the wrong file for a build fails here).
+fn gold_compare(exp, elen, got, glen): i64 {
+    var total = 0;
+    var ei = 0;
+    var gi = 0;
+    var label = got;            # the current case's label line (from got)
+    var lablen = 0;
+    var k = 0;                  # value index within the case
+    var nd = 0;                 # differing lines in the case
+    var first = 0; var fe = 0; var fel = 0; var fg = 0; var fgl = 0;
+    while (ei < elen || gi < glen) {
+        var ee = _gd_eol(exp, elen, ei);
+        var ge = _gd_eol(got, glen, gi);
+        var el = ee - ei;
+        var gl = ge - gi;
+        if (ei >= elen) { el = 0; }
+        if (gi >= glen) { gl = 0; }
+        var same = 0;
+        if (el == gl && memeq(exp + ei, got + gi, el) == 1) { same = 1; }
+        if (ei >= elen || gi >= glen) { same = 0; }
+        if (gi < glen && load8(got + gi) == 64) {
+            # a new case: flush the last one's report
+            if (nd > 0) { _gd_report(label, lablen, nd, first, fe, fel, fg, fgl); }
+            label = got + gi; lablen = gl; k = 0; nd = 0;
+            if (same == 0) {
+                _gd_out("  golden: case label differs: expected ");
+                _gd_outn(exp + ei, el); _gd_out(", got "); _gd_outn(got + gi, gl); _gd_out("\n");
+                total = total + 1;
+            }
+        } else {
+            if (same == 0) {
+                if (nd == 0) { first = k; fe = exp + ei; fel = el; fg = got + gi; fgl = gl; }
+                nd = nd + 1;
+                total = total + 1;
+            }
+            k = k + 1;
+        }
+        if (ei < elen) { ei = ee + 1; }
+        if (gi < glen) { gi = ge + 1; }
+    }
+    if (nd > 0) { _gd_report(label, lablen, nd, first, fe, fel, fg, fgl); }
+    return total;
+}

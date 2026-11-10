@@ -9,8 +9,11 @@
 #   P2 a cached decode on one dirty scratch block == the batch rows, bit for bit
 #   P3 ru_attn_core_fwd / _row == the 0.5.1 loops (tests/reference.cyr), bit for bit
 #   P4 ru_model_fwd ~ the naive plain-loop forward, relative 1e-9 (bounded params)
-#   P5 a malformed config / token / position is rejected with its code, and every
-#      output — the KV cache included — keeps its sentinel
+#   P5 a malformed config / token / position / run length is rejected with its code,
+#      and every output — the KV cache included — keeps its sentinel
+#   P6 ru_model_fwd_n_s (dirty scratch) and ru_model_fwd_n over a random n <= T, with
+#      the ids past n replaced by out-of-vocab ones: rows 0..n-1 == ru_model_fwd's, bit
+#      for bit, the logits rows past n untouched (0.6.0)
 # 20,000 rounds; the bump heap is rewound each round (alloc_reset), so memory stays
 # flat. Seeded (splitmix64), so a failure reproduces exactly; the failing round and the
 # property are printed. Exit 0 = every property held in every round.
@@ -99,6 +102,22 @@ fn fz_model(round): i64 {
         pos = pos + 1;
     }
     fz_check(diffs == 0, round, "P2 cached decode != batch rows");
+    # P6: the first n positions alone, the ids past n poisoned (never read)
+    var n = 1 + rng_below(T);
+    var tn = t_alloc(T);
+    t_copy(tn, tok, T);
+    var t = n;
+    while (t < T) { store64(tn + t * 8, V + rng_below(1000)); t = t + 1; }
+    var l2 = t_alloc(T * V); var p2 = t_alloc(T * V);
+    fill_sentinel(l2, T * V);
+    fill_dirty(sc, ns);
+    var rn = ru_model_fwd_n_s(cfg, params, tn, n, l2, p2, sc);
+    fz_check(rn == 0, round, "P6 ru_model_fwd_n_s rejected a valid run");
+    fz_check(bits_diff(l2, l0, n * V) + bits_diff(p2, p0, n * V) == 0, round,
+      "P6 ru_model_fwd_n_s rows != ru_model_fwd rows");
+    fz_check(sentinel_intact(l2 + n * V * 8, (T - n) * V) == 1, round, "P6 ru_model_fwd_n_s wrote past row n");
+    ru_model_fwd_n(cfg, params, tn, n, l1, 0);
+    fz_check(bits_diff(l1, l0, n * V) == 0, round, "P6 ru_model_fwd_n rows != ru_model_fwd rows");
     # P4: bounded params against the naive forward
     fill_det(params, np, round);
     ru_model_fwd(cfg, params, tok, l0, 0);
@@ -185,13 +204,17 @@ fn fz_reject(round): i64 {
         var p = T + rng_below(100);
         if (kind == 3) { p = -1 - rng_below(100); }
         fz_check(ru_model_fwd_row(cfg, params, 0, p, kv, row) == RU_ERR_POS(), round, "P5 bad position accepted");
+        var bn = T + 1 + rng_below(100);
+        var bc = RU_ERR_POS();
+        if (kind == 3) { bn = 0 - rng_below(100); bc = RU_ERR_ARG(); }
+        fz_check(ru_model_fwd_n(cfg, params, tok, bn, lg, 0) == bc, round, "P5 bad run length accepted");
     }
     fz_check(sentinel_intact(kv, nkv + 16) + sentinel_intact(lg, T * V) + sentinel_intact(row, V) == 3, round,
       "P5 a rejected call wrote an output");
     return 0;
 }
 
-# every round runs P1-P5; the exit code is 1 when any property failed
+# every round runs P1-P6; the exit code is 1 when any property failed
 fn main(): i64 {
     alloc_init();
     var seed = 0x5EED00000502;
@@ -207,7 +230,7 @@ fn main(): i64 {
     }
     _say("rupantara fuzz: ");
     fmt_int(rounds);
-    _say(" rounds x 5 properties, seed 0x5EED00000502, failures: ");
+    _say(" rounds x 6 properties, seed 0x5EED00000502, failures: ");
     fmt_int(_fz_fail);
     _say(_nl);
     if (_fz_fail != 0) { return 1; }

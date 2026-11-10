@@ -75,3 +75,55 @@ process, alternating the AVX2 path with rosnet's forced-SSE2 switch
   rows for this bump, two `scripts/bench-history.sh` sessions taken minutes
   apart, read the model rows 4–7% *slower*. The A/B above shows that is drift
   between sessions, not the bump. Every output is bit-identical on both paths.
+
+## 0.6.0: GPT-2 throughput and the lean scratch (2026-11-09, Ryzen 7 5800H)
+
+**GPT-2 small at its real dims** (V = 50257, C = 768, T = 1024, 12 heads, 12
+layers, F = 3072, attention biases: 124M parameters, 1 GB of f64), synthetic
+weights. These are the `bench-history.csv` rows, medians of 3 runs. An earlier
+set in the same session measured 9.04 s and 98.3 ms.
+
+| Benchmark | Time | Throughput |
+|---|---:|---:|
+| Prefill, 128 tokens through the T = 1024 layout (`ru_model_fwd_n_s`, logits only) | 9.28 s | 13.8 tokens/s |
+| One decode step at pos = 1023 (`ru_model_fwd_row_s`, full-context attention) | 99.1 ms | 10.1 tokens/s |
+
+- **A decode step streams the whole model.** Each token reads all 1 GB of f64
+  weights once, a third of it the weight-tied head (38.6M of the 124M).
+- **Prefill is compute-bound**, at about 72 ms per token.
+- **The decode step's KV cache is filled synthetically.** Decoding 1,023 steps
+  to fill it would take minutes, and cache values do not change the time.
+
+**The model forward's scratch** at GPT-2-small widths, now that it holds one
+T-element probability row instead of `nh·T·T`:
+
+| T | Through 0.5.3 | Now | Smaller by |
+|---:|---:|---:|---:|
+| 1024 | 0.20 GiB | 0.106 GiB | 1.9× |
+| 4096 | 1.92 GiB | 0.42 GiB | 4.6× |
+| 8192 | 6.84 GiB, past the 2 GiB allocation cap | 0.84 GiB | 8.1× |
+
+**The lean path is speed-neutral.** Measured in one process against the 0.5.3
+path rebuilt from public pieces (`ru_block_fwd` over a full arena, which
+zero-fills and writes `Pc`), alternating which runs first, with both scratch
+blocks at the same 64-byte alignment:
+
+| Model | Lean / old |
+|---|---:|
+| Bench model (V=1024 C=256 T=64 NL=2) | 1.009 |
+| GPT-2 widths (V=1024 C=768 T=64 NL=2) | 0.996 |
+
+Every output is bit-identical.
+
+- **Scratch alignment matters more than the change itself.** Moving the lean
+  block's offset mod 64 through 0, 8, 16 and 24 bytes moved lean/old between
+  0.951 and 1.064. A bit-safe lead, in the roadmap backlog.
+- **The 0.6.0 history rows came from a slow session.** Every benchmark, changed
+  or not, reads 13–22% slower than the 0.5.3 rows. Three examples:
+  - `ru_ln_fwd`: 542 → 619 µs;
+  - GELU: 17.8 → 20.7 ms;
+  - the decode step, whose code did not change: 1.03 → 1.22 ms.
+
+  The model forward's +17–18% sits inside that band. Compare 0.6.0 with 0.5.3
+  through the A/B above, not the CSV.
+

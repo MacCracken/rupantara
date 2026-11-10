@@ -27,10 +27,11 @@ the leaf kernels do not.**
 - `ru_cfg_check` defines a valid config. It covers dims, whole heads, whole
   GQA groups, a 0/1 bias flag, and every derived buffer size within 2^56
   elements using overflow-checked arithmetic.
-- The model entries (`ru_model_fwd`, `ru_model_fwd_s`, `ru_model_fwd_row`,
-  `ru_model_fwd_row_s`), `ru_attn_fwd`, `ru_argmax` and the sizing functions
-  run their checks first. On failure they return a negative code (`RU_ERR_*`)
-  and leave every output untouched, the KV cache included.
+- The model entries (`ru_model_fwd`, `ru_model_fwd_s`, `ru_model_fwd_n`,
+  `ru_model_fwd_n_s`, `ru_model_fwd_row`, `ru_model_fwd_row_s`), `ru_attn_fwd`,
+  `ru_argmax` and the sizing functions run their checks first. On failure they
+  return a negative code (`RU_ERR_*`) and leave every output untouched, the KV
+  cache included.
 - The leaf kernels (`ru_ln_fwd`, `ru_attn_core_fwd`, `ru_head_fwd_row`, …)
   check nothing. Their preconditions are documented in `docs/api.md`.
 - The error codes are functions, not `const`, so the bundle stays compilable

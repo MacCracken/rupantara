@@ -1,7 +1,9 @@
 # Makefile for rupantara — pure-Cyrius transformer-forward library.
 #
 #   make build   — link-check the library (programs/smoke.cyr)
-#   make test    — CPU test suites (tests/tcyr/*.tcyr)
+#   make test    — CPU test suites (tests/tcyr/*.tcyr; the golden gate among them)
+#   make test-aarch64 — every suite cross-built for aarch64, run under qemu-aarch64
+#   make golden-bless — rewrite tests/golden/*.txt after a reviewed numerical change
 #   make fuzz    — seeded property fuzzing (tests/rupantara.fcyr; exit 1 = a property failed)
 #   make bench   — benchmarks (tests/rupantara.bcyr); scripts/bench-history.sh records them
 #   make dist    — regenerate dist/rupantara.cyr via `cyrius distlib`
@@ -30,6 +32,24 @@ build: check-lib-wiring
 .PHONY: test
 test: check-lib-wiring
 	@for f in tests/tcyr/*.tcyr; do $(CYRIUS) test "$$f" || exit 1; done
+
+# every suite cross-built for aarch64 and run under qemu-aarch64 (CI's aarch64 job)
+.PHONY: test-aarch64
+test-aarch64: check-lib-wiring
+	@mkdir -p build
+	@for f in tests/tcyr/*.tcyr; do \
+		n=$$(basename $$f .tcyr); \
+		$(CYRIUS) build --aarch64 $$f build/$${n}_a64 > /dev/null || exit 1; \
+		echo "== $$n"; qemu-aarch64 build/$${n}_a64 || exit 1; \
+	done
+
+# Rewrite tests/golden/{x86_64,aarch64}.txt from the current tree. Only after review:
+# a moved bit is a numerical change (ADR 0002), so name it in the CHANGELOG, and check
+# `git diff tests/golden/` shows only the values you meant to move.
+.PHONY: golden-bless
+golden-bless: check-lib-wiring
+	RU_GOLDEN_BLESS=1 $(CYRIUS) test tests/tcyr/golden.tcyr
+	RU_GOLDEN_BLESS=1 $(CYRIUS) test --aarch64 tests/tcyr/golden.tcyr
 
 .PHONY: fuzz
 fuzz: check-lib-wiring

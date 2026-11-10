@@ -21,13 +21,15 @@ The inputs that can be wrong are the config, the packed parameters, the token
 ids and the decode positions.
 
 - **Validated (0.5.2).** The model entries check the config (`ru_cfg_check`),
-  every token id against `[0, V)` and the decode position against `[0, T)`.
+  every token id against `[0, V)`, the decode position against `[0, T)` and
+  the run length of the variable-length forward against `[1, T]` (0.6.0;
+  only the first `n` ids are read or checked).
   They also check null pointers. Every buffer size is computed with
   overflow-checked arithmetic and capped at 2^56 elements, so a hostile config
   cannot wrap a size into a small allocation. A rejected call returns a
   negative code and writes nothing. The validated entries are `ru_model_fwd`,
-  `ru_model_fwd_s`, `ru_model_fwd_row`, `ru_model_fwd_row_s`, `ru_attn_fwd`,
-  `ru_argmax`, and the sizing functions.
+  `ru_model_fwd_s`, `ru_model_fwd_n`, `ru_model_fwd_n_s`, `ru_model_fwd_row`,
+  `ru_model_fwd_row_s`, `ru_attn_fwd`, `ru_argmax`, and the sizing functions.
 - **Caller's contract.** The leaf kernels (`ru_ln_fwd`, `ru_attn_core_fwd`,
   `ru_head_fwd_row`, …) take dims and buffers on trust and check nothing, as
   rosnet's do. Each buffer must hold what `docs/api.md` says for its dims. A

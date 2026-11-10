@@ -1,0 +1,68 @@
+# tests/tcyr/golden.tcyr — the golden gate. Regenerates tests/golden.cyr's dump (the
+# raw bits of every public forward op at fixed inputs) and compares it, line by line,
+# with the committed tests/golden/<target>.txt. Any change that moves one bit fails
+# here, naming the case, the value and both patterns, until it is reviewed and
+# re-blessed with a CHANGELOG note (ADR 0002).
+#
+# Re-bless after review: `make golden-bless` (RU_GOLDEN_BLESS=1) rewrites the file for
+# x86_64 natively and for aarch64 under qemu; `git diff tests/golden/` then shows
+# exactly which values moved. x86_64 and aarch64 differ (the fused FMLA), hence one
+# file per target. Run from the repository root (the file path is relative).
+include "src/lib.cyr"
+include "lib/assert.cyr"
+include "tests/common.cyr"     # fill_det
+include "tests/golden.cyr"
+
+fn _gold_path(): i64 {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return "tests/golden/aarch64.txt";
+    #endif
+    return "tests/golden/x86_64.txt";
+}
+
+fn _gold_target(): i64 {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return " target aarch64";
+    #endif
+    return " target x86_64";
+}
+
+# 1 when RU_GOLDEN_BLESS=1 is set
+fn _gold_bless_mode(): i64 {
+    var v = getenv("RU_GOLDEN_BLESS");
+    if (v == 0) { return 0; }
+    return streq(v, "1");
+}
+
+fn test_golden() {
+    test_group("golden: every forward output matches the committed dump");
+    var glen = gold_build(_gold_target());
+    assert_gt(glen, 0, "the dump fits its buffer");
+    if (glen <= 0) { return 0; }
+    if (_gold_bless_mode() == 1) {
+        var w = file_write_all(_gold_path(), _gd_buf, glen);
+        assert_eq(w, glen, "bless: dump written");
+        _gd_out("  golden: blessed "); _gd_out(_gold_path()); _gd_out(" (");
+        fmt_int(glen); _gd_out(" bytes)\n");
+        return 0;
+    }
+    # file_read_all (not file_read_whole_max, cyrius 6.6.7+) so the suite builds on older
+    # pins too; a file that fills the whole buffer is refused as possibly truncated
+    var cap = 16777216;
+    var exp = alloc(cap);
+    var elen = file_read_all(_gold_path(), exp, cap);
+    assert(elen > 0 && elen < cap, "the committed dump is readable (run from the repo root)");
+    if (elen <= 0 || elen >= cap) { return 0; }
+    assert_eq(gold_compare(exp, elen, _gd_buf, glen), 0, "lines that differ from the committed dump");
+    return 0;
+}
+
+# runs the suite; the exit code is the failure count
+fn main(): i64 {
+    alloc_init();
+    test_golden();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(SYS_EXIT, rc);

@@ -6,6 +6,126 @@ surface is still moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-09
+
+The rupantara side of the 0.6.x roadmap: a committed golden gate, the
+variable-length forward, a model forward without attention-probability scratch,
+and GPT-2-small throughput. Every output is bit-identical to 0.5.3 on x86_64
+and aarch64.
+
+### Added
+
+- **A committed golden gate.** `tests/tcyr/golden.tcyr` regenerates
+  `tests/golden.cyr`'s dump and compares it, line by line, with the committed
+  `tests/golden/x86_64.txt` or `tests/golden/aarch64.txt`.
+  - **Coverage:** 9,969 raw 64-bit patterns per target, in 19 cases:
+    - the model forward and decode at six configs (MHA ± bias, GQA over three
+      blocks, MQA, odd widths, C = 64), with each call's return code and the
+      parameter count;
+    - every kernel called directly: both attention cores, `Pc` included,
+      because attn11's backward reads it; `ru_attn_fwd` and its row form; the
+      embedding, head, softmax and argmax; `ru_block_fwd`; LayerNorm; GELU;
+      the MLP; `linear_fwd`; `linear_fwd_gpu`;
+    - a sweep of GELU over [-10, 10] and of softmax over a [-50, 50] row.
+  - **A failure names** the case, the first differing value's index, and both
+    bit patterns.
+  - **`make golden-bless`** (`RU_GOLDEN_BLESS=1`) rewrites both files, for a
+    reviewed numerical change only.
+  - **Checked against the old dumps:** every section shared with the ad-hoc
+    0.5.3 dump, which was proven identical to 0.5.1, is identical on both
+    targets.
+  - **It catches toolchain moves.** Under cyrius 6.6.12 and 6.6.2 it fails on
+    every GELU-dependent case; the attention, embedding and head cases pass.
+    It passes at 6.6.13. That is the `f64_tanh` change of 6.6.13, which the
+    0.4.4 pin bump missed.
+  - **It reads its file with `file_read_all`**, so the suite also builds on
+    cyrius releases before 6.6.7.
+- **An aarch64 CI job.** It cross-builds every suite and runs it under
+  qemu-user, akshara's setup, so the aarch64 golden file is enforced in CI.
+  `make test-aarch64` runs the same locally.
+- **`ru_model_fwd_n(cfg, params, tokens, n, logits, probs)` and
+  `ru_model_fwd_n_s(…, scratch)`**, the variable-length forward.
+  - **What it runs:** positions `0..n-1` only, `1 <= n <= T`, writing
+    `logits(n,V)` and optionally `probs(n,V)`. `T` stays the layout's context
+    (the `pos_emb` rows), so one parameter buffer serves every run length.
+  - **Bits:** rows `0..n-1` are bit-identical to `ru_model_fwd`'s over the
+    window padded to `T`.
+  - **Reads:** only the first `n` ids are read and checked, and only the
+    `n`-row prefix of the scratch is touched.
+  - **Codes:** `n < 1` returns `RU_ERR_ARG`, `n > T` returns `RU_ERR_POS`, and
+    the other codes are as for `ru_model_fwd`, with nothing written on a
+    rejection.
+  - **Scratch:** the `_s` entry takes `ru_model_scratch_count(cfg)`, enough for
+    any `n`. The allocating entry allocates for `n` rows.
+- **GPT-2-small benchmarks** in `tests/rupantara.bcyr`, at V = 50257, C = 768,
+  T = 1024, 12 layers and 124M synthetic parameters:
+  - a 128-token prefill on `ru_model_fwd_n_s`: 9.04–9.28 s, or
+    13.8–14.2 tokens/s;
+  - one decode step at pos = 1023: 98.3–99.1 ms, or 10.1–10.2 tokens/s.
+
+  Each prints its tokens/s. The ranges span two median-of-3 sets on a Ryzen 7
+  5800H.
+- **`bench-history.csv` gains 14 rows at 0.6.0.** That session was slow across
+  the board: unchanged ops read 13–22% slower than the 0.5.3 rows, and the
+  model forward's +17–18% sits in that band. The in-process A/B is the
+  comparison (`docs/benchmarks.md`).
+
+### Changed
+
+- **The model forward's scratch no longer holds the attention probabilities.**
+  - **Before:** each block ran `ru_attn_fwd`, whose `nh·T·T` `Pc` the forward
+    never read again, and zero-filled it.
+  - **Now:** each (head, query row) pair runs through one reused T-element row.
+    The new `_ru_attn_core` is `ru_attn_core_fwd`'s head-outer loop with
+    `Pc = 0`, shared by both, so the outputs are bit-identical.
+  - **Sizes at GPT-2-small widths:** `ru_model_scratch_count` gives 0.106 GiB
+    at T = 1024 (from 0.20), 0.42 GiB at T = 4096 (from 1.92), and 0.84 GiB
+    at T = 8192 (from 6.84, which was past the 2 GiB allocation cap).
+  - **Unchanged:** `ru_attn_fwd`, `ru_attn_core_fwd` and `ru_block_fwd`
+    (anukūlana's LoRA demo calls it) still fill their full arena.
+  - **Speed is neutral.** An in-process A/B against the 0.5.3 path, run with
+    alternating order and equal 64-byte alignment, gives 1.009 on the bench
+    model and 0.996 at GPT-2 widths. The scratch block's alignment alone moved
+    either by up to ±5%, a bit-safe lead now in the roadmap backlog.
+- **`ru_cfg_check` accepts a config whose only oversize buffer was the
+  `nh·T·T` probabilities.** The model forward no longer sizes them, and
+  `ru_attn_arena_size` still refuses such a shape.
+- **`ru_model_fwd` and `ru_model_fwd_s` are now the `n = T` case** of the
+  variable-length entries: same checks, same codes, same bits. A null `cfg`
+  returns `RU_ERR_CFG` before `T` is read.
+- **The bundle grows** to 1,118 lines and keeps its `math` / `ganita` sidecar.
+  It still compiles and runs under cyrius 6.6.2. None of the seven new function
+  names is defined in attn11 or anukūlana.
+- **Docs updated:** `docs/api.md` (the new entries, the errors table, the
+  scratch note, the golden gate, and the finding that GELU matches across
+  targets while softmax's `f64_exp` differs by at most 1 ulp), `SECURITY.md`,
+  ADR 0002 (the gate is committed), ADR 0003, `docs/benchmarks.md`,
+  `state.md`, the roadmap (0.6.x reduced to the cross-repo items), `README.md`
+  and `CLAUDE.md`.
+
+### Tests
+
+- **164 → 192 assertions.** The new ones are `golden` (3), `forward` +9 (every
+  run length on three configs) and `guard` +16. The `guard` additions cover:
+  - the run-length rejections and the null-`cfg` guard;
+  - an id past `n` that is never read;
+  - the scratch-prefix property;
+  - the T = 8192 scratch fitting one allocation;
+  - the lean count.
+- **Fuzz P6:** a random `n <= T`, with the ids past `n` replaced by
+  out-of-vocab ones. Rows `0..n-1` must equal `ru_model_fwd`'s, and the rows
+  past `n` must stay untouched. P5 adds bad run lengths. 20,000 rounds × 6
+  properties, 0 failures.
+- **Mutation testing:** 11 mutants of the new code, all killed. Three of
+  them survived until the scratch-prefix test was added, at T = 24 and F = 4:
+  the MLP, the final LayerNorm and the embedding each run over `T` rows
+  instead of `n`. That leaves rows `0..n-1` correct, but it would overflow the
+  allocating `ru_model_fwd_n`'s block.
+- **Consumers, checked without touching their repos:** in scratch copies built
+  against this bundle, attn11's suite passes 1,089/1,089, with
+  `test_rupantara_parity` and the gradient checks through `ru_attn_core_fwd`,
+  and anukūlana's 9 suites pass 219/219.
+
 ## [0.5.3] - 2026-11-09
 
 A dependency realign onto the latest rosnet. There is no API change, and every

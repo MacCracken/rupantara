@@ -28,7 +28,10 @@ without depending on attn11-the-binary. Pure Cyrius. GPL-3.0-only.
   gitignored.
 - The Cyrius pin (`cyrius = "…"` in `cyrius.cyml`) is the single source of truth.
 - **Optimizations must keep every output bit-identical** (ADR 0002): the attn11
-  parity contract. Gate a kernel change with the oracles in `tests/reference.cyr`.
+  parity contract. Gate a kernel change with the oracles in `tests/reference.cyr`
+  and the committed golden gate (`tests/tcyr/golden.tcyr` against
+  `tests/golden/<target>.txt`). `make golden-bless` only for a reviewed
+  numerical change, named in the CHANGELOG.
 - **Model entries validate, leaf kernels trust** (ADR 0003). The error codes are
   functions (`RU_ERR_*()`), not `const`, so the bundle compiles on pre-6.7 cyrius.
 - anukūlana calls the underscore layout helpers (`_cfg_*`, `_ru_o_*`, `_p_*`,
@@ -40,7 +43,8 @@ without depending on attn11-the-binary. Pure Cyrius. GPL-3.0-only.
 
 ```sh
 make build   # cyrius build programs/smoke.cyr build/rupantara_smoke
-make test    # cyrius test tests/tcyr/*.tcyr
+make test    # cyrius test tests/tcyr/*.tcyr (the golden gate among them)
+make test-aarch64  # every suite cross-built for aarch64, run under qemu-aarch64
 make fuzz    # seeded property fuzzing (tests/rupantara.fcyr)
 make bench   # benchmarks; scripts/bench-history.sh records medians
 make dist    # cyrius distlib -> dist/rupantara.cyr

@@ -45,3 +45,17 @@ date,version,benchmark,time_ns
 2026-11-09T21:49:43Z,0.5.3,"ru_model_fwd_row pos=63 (same model, one decode step)",1034000
 2026-11-09T21:49:43Z,0.5.3,"ru_model_fwd_s (same model, caller scratch)",63107000
 2026-11-09T21:49:43Z,0.5.3,"ru_model_fwd_row_s pos=63 (same model, caller scratch)",1057000
+2026-11-10T00:27:56Z,0.6.0,"ru_attn_core_fwd T=128 C=768 nh=12",13504000
+2026-11-10T00:27:56Z,0.6.0,"ru_attn_core_fwd T=128 C=768 nh=12 nkv=4",14002000
+2026-11-10T00:27:56Z,0.6.0,"ru_attn_core_fwd_row pos=511 C=768 nh=12",878342
+2026-11-10T00:27:56Z,0.6.0,"ru_head_fwd_row C=768 V=12564 (1/4 LM head row)",9529000
+2026-11-10T00:27:56Z,0.6.0,"ru_ln_fwd 64x768",618686
+2026-11-10T00:27:56Z,0.6.0,"ru_gelu_fwd n=64x3072",20655000
+2026-11-10T00:27:56Z,0.6.0,"ru_softmax_fwd 1x50257",1319000
+2026-11-10T00:27:56Z,0.6.0,"ru_embed_fwd 64x768",23034
+2026-11-10T00:27:56Z,0.6.0,"ru_model_fwd V=1024 C=256 T=64 nh=4 NL=2 F=1024",75453000
+2026-11-10T00:27:56Z,0.6.0,"ru_model_fwd_row pos=63 (same model, one decode step)",1216000
+2026-11-10T00:27:56Z,0.6.0,"ru_model_fwd_s (same model, caller scratch)",73934000
+2026-11-10T00:27:56Z,0.6.0,"ru_model_fwd_row_s pos=63 (same model, caller scratch)",1289000
+2026-11-10T00:27:56Z,0.6.0,"GPT-2 small prefill n=128 (T=1024 layout, logits only)",9278000000
+2026-11-10T00:27:56Z,0.6.0,"GPT-2 small decode step pos=1023 (caller scratch)",99098000

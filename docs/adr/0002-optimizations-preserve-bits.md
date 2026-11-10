@@ -36,9 +36,13 @@ sequence of roundings on every target it already matched.** Concretely:
   where the two paths round differently.
 
 The gate is a raw-bit golden dump of every public forward op, compared before
-and after on x86_64 and on aarch64 (under qemu). In-repo, the 0.5.1 attention
-cores are kept verbatim in `tests/reference.cyr`, and `tests/tcyr/reference.tcyr`
-and the fuzz harness hold the new cores to them bit for bit.
+and after on x86_64 and on aarch64 (under qemu). Since 0.6 it is committed:
+`tests/tcyr/golden.tcyr` compares the tree against `tests/golden/x86_64.txt`
+and `tests/golden/aarch64.txt` in CI, on both targets. A change that moves a
+bit fails until it is reviewed, re-blessed (`make golden-bless`) and named in
+the CHANGELOG. In-repo, the 0.5.1 attention cores are kept verbatim in
+`tests/reference.cyr`, and `tests/tcyr/reference.tcyr` and the fuzz harness
+hold the new cores to them bit for bit.
 
 ## Consequences
 

@@ -1,10 +1,11 @@
 # @public — rupantara argument guards: the error codes the model-level entry points
 # return, and overflow-checked size arithmetic for the sizing functions.
 #
-# THE CONTRACT (0.5.2). The model-level entries — ru_model_fwd(_s), ru_model_fwd_row(_s),
-# ru_attn_fwd — and the sizing functions validate what they are handed before they
-# write anything: a malformed config, a token id outside [0, V) or a decode position
-# outside [0, T) returns a negative code below and leaves every output untouched. The
+# THE CONTRACT (0.5.2). The model-level entries — ru_model_fwd(_s), ru_model_fwd_n(_s),
+# ru_model_fwd_row(_s), ru_attn_fwd — and the sizing functions validate what they are
+# handed before they write anything: a malformed config, a token id outside [0, V), a
+# decode position outside [0, T) or a run length outside [1, T] returns a negative code
+# below and leaves every output untouched. The
 # leaf kernels (ru_ln_fwd, ru_gelu_fwd, ru_attn_core_fwd, ru_mlp_fwd, ru_head_fwd*,
 # ru_softmax_fwd, ru_embed_fwd) take caller buffers and dims on trust, as rosnet's do:
 # no checks, so the hot loops pay nothing. See docs/api.md.
@@ -59,4 +60,14 @@ fn _ru_arena_c(T, C, nh, nkv): i64 {
     var s = _ru_mulc(2, _ru_mulc(T, C));
     s = _ru_addc(s, _ru_mulc(2, _ru_mulc(T, Ckv)));
     return _ru_addc(s, _ru_mulc(nh, _ru_mulc(T, T)));
+}
+
+# Checked element count of the model forward's lean attention arena (0.6.0), or -1:
+# Qc and concat (T*C each), Kc and Vc (T*Ckv each) and ONE T-element probability row —
+# the full arena without its nh*T*T Pc, which the model forward never reads again.
+fn _ru_lean_arena_c(T, C, nh, nkv): i64 {
+    var Ckv = nkv * (C / nh);
+    var s = _ru_mulc(2, _ru_mulc(T, C));
+    s = _ru_addc(s, _ru_mulc(2, _ru_mulc(T, Ckv)));
+    return _ru_addc(s, T);
 }

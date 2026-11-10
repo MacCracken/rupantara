@@ -10,6 +10,9 @@
 #   - ru_ln_fwd 64x768, ru_gelu_fwd 64x3072, ru_softmax_fwd 1x50257, ru_embed_fwd 64x768
 #   - ru_model_fwd / ru_model_fwd_row on a small GPT (V=1024 C=256 T=64 nh=4 NL=2 F=1024, bias),
 #     allocating and on caller scratch (the _s entries, 0.5.2)
+#   - GPT-2 small (V=50257 C=768 T=1024 nh=12 NL=12 F=3072, bias; 124M params, 1 GB f64,
+#     synthetic): a 128-token prefill through the T=1024 layout (ru_model_fwd_n_s, 0.6.0)
+#     and one decode step at pos=1023 (the full-context worst case), each with tokens/s
 # Labels are stable across releases: scripts/bench-history.sh keys bench-history.csv on them.
 include "src/lib.cyr"
 
@@ -186,6 +189,59 @@ fn bench_model(): i64 {
     return 0;
 }
 
+# "    = <x.y> tokens/s" for a benchmark whose iteration processed ntok tokens (a line
+# bench-history.sh does not parse: it starts with '=')
+fn _bench_tps(b, ntok): i64 {
+    var ns = bench_avg_ns(b);
+    if (ns <= 0) { return 0; }
+    var t10 = ntok * 10000000000 / ns;
+    sys_write(1, "    = ", 6);
+    fmt_int(t10 / 10);
+    sys_write(1, ".", 1);
+    fmt_int(t10 % 10);
+    sys_write(1, " tokens/s\n", 10);
+    return 0;
+}
+
+# GPT-2 small at its real dims with synthetic weights (values do not change the time).
+# Prefill: a 128-token prompt through the T = 1024 layout on caller scratch, logits only.
+# Decode: one cached step at the window's last position against a KV cache filled
+# synthetically (decoding 1,023 steps to fill it would take minutes).
+fn bench_gpt2(): i64 {
+    var V = 50257; var C = 768; var T = 1024; var nh = 12; var NL = 12; var F = 3072;
+    var cfg = t_alloc(8);
+    ru_cfg_init(cfg, V, C, T, nh, nh, NL, F, 1);
+    var np = ru_params_count(cfg);
+    var params = t_alloc(np);
+    _bfill(params, np, 17);
+    var n = 128;
+    var tokens = t_alloc(n);
+    var i = 0;
+    while (i < n) { store64(tokens + i * 8, (i * 389 + 7) % V); i = i + 1; }
+    var logits = t_alloc(n * V);
+    var sc = t_alloc(ru_model_scratch_count(cfg));
+    var b1 = bench_new("GPT-2 small prefill n=128 (T=1024 layout, logits only)");
+    bench_batch_start(b1);
+    i = 0;
+    while (i < 2) { ru_model_fwd_n_s(cfg, params, tokens, n, logits, 0, sc); i = i + 1; }
+    bench_batch_stop(b1, 2);
+    bench_report(b1);
+    _bench_tps(b1, n);
+    var nkv = ru_decode_kv_count(cfg);
+    var kv = t_alloc(nkv);
+    _bfill(kv, nkv, 18);
+    var row = t_alloc(V);
+    var ds = t_alloc(ru_decode_scratch_count(cfg));
+    var b2 = bench_new("GPT-2 small decode step pos=1023 (caller scratch)");
+    bench_batch_start(b2);
+    i = 0;
+    while (i < 5) { ru_model_fwd_row_s(cfg, params, 464, T - 1, kv, row, ds); i = i + 1; }
+    bench_batch_stop(b2, 5);
+    bench_report(b2);
+    _bench_tps(b2, 1);
+    return 0;
+}
+
 # runs every benchmark in a fixed order (bench-history.csv keys on the labels)
 fn main(): i64 {
     alloc_init();
@@ -195,6 +251,7 @@ fn main(): i64 {
     bench_head_row();
     bench_leaf_ops();
     bench_model();
+    bench_gpt2();
     return 0;
 }
 
